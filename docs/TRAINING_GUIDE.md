@@ -1,6 +1,6 @@
 # Training Guide
 
-This guide is the practical path for fine-tuning Kokoro-82M for German.
+This guide is the practical path for fine-tuning Kokoro-82M for French.
 
 For deep debugging details, see `TROUBLESHOOTING.md`.
 For architecture and compatibility notes, see `ARCHITECTURE.md`.

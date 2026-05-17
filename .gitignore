@@ -22,6 +22,8 @@ env/
 
 # ── Dataset (not redistributable — see README) ─────────────────────────────
 dataset/
+raw/
+cache/
 
 # ── Training data lists (derived from non-redistributable dataset) ──────────
 training/train_list.txt

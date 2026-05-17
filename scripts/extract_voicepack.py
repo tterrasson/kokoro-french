@@ -160,10 +160,13 @@ class StyleEncoder(nn.Module):
         blocks = []
         blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
         repeat_num = 4
+        dim_out = None
+
         for _ in range(repeat_num):
             dim_out = min(dim_in * 2, max_conv_dim)
             blocks += [ResBlk(dim_in, dim_out, downsample="half")]
             dim_in = dim_out
+
         blocks += [nn.LeakyReLU(0.2)]
         blocks += [spectral_norm(nn.Conv2d(dim_out, dim_out, 5, 1, 0))]
         blocks += [nn.AdaptiveAvgPool2d(1)]
@@ -175,6 +178,7 @@ class StyleEncoder(nn.Module):
         h = self.shared(x)
         h = h.view(h.size(0), -1)
         s = self.unshared(h)
+
         return s
 
 
@@ -251,6 +255,7 @@ def extract_voicepack(
         print(f"  style_encoder loaded (epoch {se_epoch})")
     else:
         style_encoder.load_state_dict(strip_prefix(net["style_encoder"]))
+        se_net = None
 
     # predictor_encoder is only trained in Stage 2 (train_second.py).
     # After Stage 1 only, its weights are randomly initialized and produce
@@ -273,6 +278,8 @@ def extract_voicepack(
     if not predictor_encoder_trained:
         print("  predictor_encoder appears untrained (Stage 1 only)")
         print("  Using style_encoder for both acoustic and prosodic embeddings")
+        assert se_net is not None
+
         predictor_encoder.load_state_dict(
             strip_prefix(se_net["style_encoder"])
             if style_encoder_model
@@ -290,13 +297,13 @@ def extract_voicepack(
         print(f"  style_encoder output norm (dummy): {se_norm:.4f}")
         print(f"  predictor_encoder output norm (dummy): {pe_norm:.4f}")
         if se_norm < 0.5:
-            print(f"  WARNING: style_encoder norm is very low ({se_norm:.4f}).")
-            print(f"  This may indicate a collapsed encoder. Consider using")
-            print(f"  --style-encoder-model to load from a Stage 1 checkpoint.")
+            print("  WARNING: style_encoder norm is very low ({se_norm:.4f}).")
+            print("  This may indicate a collapsed encoder. Consider using")
+            print("  --style-encoder-model to load from a Stage 1 checkpoint.")
 
     epoch = checkpoint.get("epoch", "?")
     val_loss = checkpoint.get("val_loss", 0)
-    print(f"Loaded encoders from checkpoint")
+    print("Loaded encoders from checkpoint")
     print(f"  Epoch: {epoch}, Val loss: {val_loss:.4f}")
 
     # ── Mel spectrogram transform ────────────────────────────────────────
@@ -319,7 +326,7 @@ def extract_voicepack(
     prosodic_styles = []
     skipped = 0
 
-    print(f"\nExtracting style vectors...")
+    print("\nExtracting style vectors...")
     with torch.no_grad():
         for i, wav_path in enumerate(wav_files):
             # Load audio via soundfile (avoids torchcodec dependency)

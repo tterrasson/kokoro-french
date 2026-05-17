@@ -3,12 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "kokoro-deutsch"
+name = "kokoro-french"
 version = "0.1.0"
-description = "Fine-tuning Kokoro-82M for German TTS using StyleTTS2"
+description = "Fine-tuning Kokoro-82M for French TTS using StyleTTS2"
 readme = "README.md"
 authors = [
     { name="semidark" },
+    { name="Thibault Terrasson" },
 ]
 license = { file = "LICENSE" }
 classifiers = [
@@ -18,12 +19,27 @@ classifiers = [
 ]
 requires-python = ">=3.10, <3.14"
 dependencies = [
+    "accelerate>=1.13.0",
+    "einops>=0.8.2",
+    "einops-exts>=0.0.4",
     "huggingface_hub",
+    "ipython>=8.39.0",
+    "librosa>=0.11.0",
     "loguru",
-    "misaki[en,de]>=0.9.4",
+    "matplotlib>=3.10.9",
+    "misaki>=0.9.4",
+    "munch>=4.0.0",
     "numpy",
-    "torch",
-    "transformers"
+    "openai-whisper>=20250625",
+    "pandas>=2.3.3",
+    "phonemizer>=3.3.0",
+    "resemblyzer>=0.1.4",
+    "soundfile>=0.13.1",
+    "tensorboard>=2.20.0",
+    "torch==2.6.0",
+    "torchaudio==2.6.0",
+    "torchvision",
+    "transformers",
 ]
 
 [project.scripts]
@@ -35,9 +51,17 @@ sources = ["kokoro"]
 only-packages = true
 
 [project.urls]
-Homepage = "https://github.com/semidark/kokoro-deutsch"
-Repository = "https://github.com/semidark/kokoro-deutsch"
+Homepage = "https://github.com/tterrasson/kokoro-french"
+Repository = "https://github.com/tterrasson/kokoro-french"
 Upstream = "https://github.com/hexgrad/kokoro"
 
 [tool.uv.sources]
 misaki = { git = "https://github.com/semidark/misaki.git", branch = "main" }
+torch = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true

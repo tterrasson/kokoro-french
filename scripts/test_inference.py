@@ -25,7 +25,13 @@ Usage:
 
 import argparse
 import sys
+import os
 from pathlib import Path
+import espeakng_loader
+
+
+os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
+espeakng_loader.make_library_available()
 
 # Prefer the kokoro submodule over any pip-installed kokoro package
 _repo_root = Path(__file__).resolve().parents[1]
@@ -35,20 +41,15 @@ if _kokoro_submodule.exists() and str(_kokoro_submodule) not in sys.path:
 
 # Standard German phonetic test set — covers all major pronunciation challenges
 TEST_SENTENCES = [
-    # 1. Umlauts (ä, ö, ü) and sch
-    "Schön, dass du da bist. Die Bücher liegen auf dem großen Tisch.",
-    # 2. Ich-Laut vs Ach-Laut (ç vs x)
-    "Ich mache mich auf den Weg nach Aachen, um auch nachts wach zu sein.",
-    # 3. Eszett (ß) and vowel length
-    "Er aß die Maße in der Straße, aber das Maß war voll.",
-    # 4. Zischlaute (z, ts) and consonant clusters
-    "Zwei weiße Zwerge zwängen sich zwischen zwei Zweige.",
-    # 5. Pf-Laute
-    "Ein Pfau pflegt seine Federn an der Pfütze.",
-    # 6. Prosody: questions and exclamations
-    "Warum hast du das getan? Das ist ja unglaublich!",
-    # 7. Numbers
-    "Das kostet genau einhundertdreiundzwanzig Millionen Euro.",
+    "La République française est un État démocratique et laïque.",
+    "Demain il pleuvra, n'oubliez pas de prendre votre parapluie.",
+    "Pourriez-vous m'indiquer le chemin de la gare, s'il vous plaît ?",
+    "Cette tâche nécessite une attention particulière et beaucoup de soin.",
+    "Pourriez-vous m'expliquer comment fonctionne cet appareil ?",
+    "La bibliothèque est ouverte du lundi au vendredi de huit heures à vingt heures.",
+    "Veuillez excuser le retard, le trafic était particulièrement difficile aujourd'hui.",
+    "Avez-vous déjà entendu l'Orchestre de Paris en concert ?",
+    "Le médecin recommande de marcher au moins trente minutes par jour.",
 ]
 
 
@@ -115,8 +116,8 @@ def run_inference(
     kmodel = KModel(repo_id="hexgrad/Kokoro-82M", config=config_path, model=model_path)
     kmodel = kmodel.to(device).eval()
 
-    # Create pipeline with German lang_code
-    pipeline = KPipeline(lang_code="d", repo_id="hexgrad/Kokoro-82M", model=kmodel)
+    # Create pipeline with French lang_code
+    pipeline = KPipeline(lang_code="f", repo_id="hexgrad/Kokoro-82M", model=kmodel)
 
     # Load voicepack
     print(f"Loading voicepack: {voicepack_path}")
@@ -133,7 +134,8 @@ def run_inference(
         try:
             generator = pipeline(text, voice=voice, speed=1)
             all_audio = []
-            for gs, ps, audio in generator:
+            for _, ps, audio in generator:
+                assert ps is not None
                 print(f"  phonemes: {ps[:60]}...")
                 all_audio.append(audio)
 
@@ -146,7 +148,7 @@ def run_inference(
                 duration = len(combined) / 24000
                 print(f"  saved: {wav_path} ({duration:.1f}s)")
             else:
-                print(f"  WARNING: No audio generated")
+                print("  WARNING: No audio generated")
         except Exception as e:
             print(f"  ERROR: {e}")
 
@@ -155,7 +157,7 @@ def run_inference(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Test fine-tuned Kokoro German model",
+        description="Test fine-tuned Kokoro French model",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     group = parser.add_mutually_exclusive_group(required=True)
@@ -195,7 +197,7 @@ def main():
     if args.checkpoint:
         model_path = convert_checkpoint(
             args.checkpoint,
-            str(Path(args.output_dir) / "kokoro_german_converted.pth"),
+            str(Path(args.output_dir) / "kokoro_french_converted.pth"),
         )
     else:
         model_path = args.model

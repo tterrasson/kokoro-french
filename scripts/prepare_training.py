@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Kokoro German: Prepare Training Data
+Kokoro French: Prepare Training Data
 =====================================
 Converts the dataset produced by prepare_dataset.py into the format
 expected by StyleTTS2's training scripts.
@@ -22,8 +22,18 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 from pathlib import Path
+
+import espeakng_loader
+import numpy as np
+from huggingface_hub import hf_hub_download
+from misaki import espeak
+from tqdm import tqdm
+
+os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
+espeakng_loader.make_library_available()
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -63,14 +73,14 @@ def cmd_prepare():
     if not METADATA_FILE.exists() or not PHONEMES_FILE.exists():
         print("ERROR: metadata.csv or phonemes.csv not found.")
         print(
-            "Run: uv run python scripts/prepare_dataset.py format --rename-speakers d_speaker1=dm_daniel"
+            "Run: uv run python scripts/prepare_dataset.py format --rename-speakers d_speaker0=df_camille d_speaker1=dm_pierre"
         )
         sys.exit(1)
 
     # Parse metadata: filename|text|speaker
     meta = {}
     with open(METADATA_FILE) as f:
-        header = f.readline()  # skip header
+        f.readline()  # skip header
         for line in f:
             line = line.strip()
             if not line:
@@ -83,7 +93,7 @@ def cmd_prepare():
     # Parse phonemes: filename|ipa
     phonemes = {}
     with open(PHONEMES_FILE) as f:
-        header = f.readline()  # skip header
+        f.readline()  # skip header
         for line in f:
             line = line.strip()
             if not line:
@@ -145,7 +155,6 @@ def cmd_prepare():
 
     # ── Write train/val lists ────────────────────────────────────────────
     # Format: relative_wav_path|phoneme_sequence|speaker_id
-    # Note: We use the wav path relative to the audio dir
     def write_list(path, entries_list):
         with open(path, "w") as f:
             for e in entries_list:
@@ -159,57 +168,50 @@ def cmd_prepare():
     print(f"Wrote {TRAIN_LIST} ({len(train_entries):,} lines)")
     print(f"Wrote {VAL_LIST} ({len(val_entries):,} lines)")
 
-    # ── Write OOD texts (German sentences not in training) ───────────────
+    # ── Write OOD texts (French sentences not in training) ───────────────
     ood_sentences = [
-        "Die Bundesrepublik Deutschland ist ein demokratischer Staat.",
-        "Morgen wird es regnen, nehmen Sie einen Regenschirm mit.",
-        "Der schnelle braune Fuchs springt über den faulen Hund.",
-        "Können Sie mir bitte den Weg zum Bahnhof zeigen?",
-        "Die Kinder spielen fröhlich im Garten und lachen laut.",
-        "Wissenschaftler haben eine bahnbrechende Entdeckung gemacht.",
-        "Das Frühstück war ausgezeichnet, besonders die frischen Brötchen.",
-        "Im Schwarzwald gibt es viele schöne Wanderwege zu entdecken.",
-        "Die Universität bietet verschiedene Studiengänge für internationale Studenten an.",
-        "Bitte vergessen Sie nicht, die Tür abzuschließen, wenn Sie gehen.",
-        "Der Weihnachtsmarkt in Nürnberg ist weltberühmt für seinen Glühwein.",
-        "Diese Aufgabe erfordert besondere Sorgfalt und Aufmerksamkeit.",
-        "Die Zugverbindung zwischen München und Berlin dauert etwa vier Stunden.",
-        "Könnten Sie mir erklären, wie dieses Gerät funktioniert?",
-        "Das Unternehmen hat im vergangenen Quartal einen Rekordgewinn erzielt.",
-        "Die Bibliothek hat montags bis freitags von acht bis zwanzig Uhr geöffnet.",
-        "Entschuldigen Sie die Verspätung, der Verkehr war heute besonders schlimm.",
-        "Die neue Brücke über den Rhein wird nächstes Jahr fertiggestellt.",
-        "Haben Sie schon einmal die Berliner Philharmoniker live gehört?",
-        "Der Arzt empfiehlt, täglich mindestens dreißig Minuten spazieren zu gehen.",
+        "La République française est un État démocratique et laïque.",
+        "Demain il pleuvra, n'oubliez pas de prendre votre parapluie.",
+        "Le renard brun rapide saute par-dessus le chien paresseux.",
+        "Pourriez-vous m'indiquer le chemin de la gare, s'il vous plaît ?",
+        "Les enfants jouent joyeusement dans le jardin et rient aux éclats.",
+        "Des scientifiques ont fait une découverte révolutionnaire.",
+        "Le petit-déjeuner était excellent, surtout les croissants frais.",
+        "Dans les Alpes, il y a de nombreux sentiers de randonnée à découvrir.",
+        "L'université propose différentes filières pour les étudiants internationaux.",
+        "N'oubliez pas de fermer la porte à clé en partant.",
+        "Le marché de Noël à Strasbourg est mondialement célèbre pour son vin chaud.",
+        "Cette tâche nécessite une attention particulière et beaucoup de soin.",
+        "La liaison en train entre Paris et Lyon dure environ deux heures.",
+        "Pourriez-vous m'expliquer comment fonctionne cet appareil ?",
+        "L'entreprise a réalisé un bénéfice record au cours du dernier trimestre.",
+        "La bibliothèque est ouverte du lundi au vendredi de huit heures à vingt heures.",
+        "Veuillez excuser le retard, le trafic était particulièrement difficile aujourd'hui.",
+        "Le nouveau pont sur la Seine sera achevé l'année prochaine.",
+        "Avez-vous déjà entendu l'Orchestre de Paris en concert ?",
+        "Le médecin recommande de marcher au moins trente minutes par jour.",
     ]
 
     # Convert OOD texts to IPA phonemes
-    try:
-        from misaki import espeak
+    g2p = espeak.EspeakG2P(language="fr-fr")
+    ood_phonemes = []
+    for text in ood_sentences:
+        try:
+            ph, _ = g2p(text)
+            ood_phonemes.append(ph)
+        except Exception:
+            pass
 
-        g2p = espeak.EspeakG2P(language="de")
-        ood_phonemes = []
-        for text in ood_sentences:
-            try:
-                ph, _ = g2p(text)
-                ph = ph.replace("\u028f", "y")  # ʏ → y fixup
-                ood_phonemes.append(ph)
-            except Exception:
-                pass
-
-        with open(OOD_FILE, "w") as f:
-            f.write("\n".join(ood_phonemes) + "\n")
-        print(f"Wrote {OOD_FILE} ({len(ood_phonemes)} sentences)")
-    except ImportError:
-        print("WARNING: misaki not available, skipping OOD text generation.")
-        print("  Generate OOD_texts.txt on a machine with misaki installed.")
+    with open(OOD_FILE, "w") as f:
+        f.write("\n".join(ood_phonemes) + "\n")
+    print(f"Wrote {OOD_FILE} ({len(ood_phonemes)} sentences)")
 
     # ── Summary ──────────────────────────────────────────────────────────
     print(f"\n{'=' * 60}")
     print(f"Training data ready in {TRAINING_DIR}/")
     print(f"  train_list.txt  : {len(train_entries):,} entries")
     print(f"  val_list.txt    : {len(val_entries):,} entries")
-    print(f"  OOD_texts.txt   : out-of-domain German sentences")
+    print(f"  OOD_texts.txt   : out-of-domain French sentences")
     print(f"  Audio dir       : {WAVS_DIR}/")
     print(f"{'=' * 60}")
 
@@ -220,18 +222,6 @@ def cmd_precompute():
     This is optional but saves significant time during GPU training.
     Run before starting training to save time during GPU training.
     """
-    import numpy as np
-
-    try:
-        import torch
-        import torchaudio
-    except ImportError:
-        print("ERROR: torch and torchaudio are required for pre-computing features.")
-        print("Install: pip install torch torchaudio")
-        sys.exit(1)
-
-    from tqdm import tqdm
-
     MELS_DIR.mkdir(parents=True, exist_ok=True)
     F0_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -247,6 +237,10 @@ def cmd_precompute():
                 wav_files.add(filename)
 
     print(f"Pre-computing features for {len(wav_files):,} files...")
+
+    import librosa
+    import torch
+    import torchaudio
 
     # Set up mel spectrogram transform
     mel_transform = torchaudio.transforms.MelSpectrogram(
@@ -290,8 +284,6 @@ def cmd_precompute():
             np.save(str(mel_path), mel.squeeze(0).numpy())
 
             # Compute F0 using pyin
-            import librosa
-
             y = waveform.squeeze().numpy()
             f0, voiced_flag, voiced_probs = librosa.pyin(
                 y,
@@ -324,14 +316,6 @@ def cmd_convert_weights(force: bool = False):
 
     We strip the 'module.' prefix and wrap in {'net': ...}.
     """
-    try:
-        import torch
-    except ImportError:
-        print("ERROR: torch is required. Install: pip install torch")
-        sys.exit(1)
-
-    from huggingface_hub import hf_hub_download
-
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
     output_path = TRAINING_DIR / "kokoro_base.pth"
 
@@ -339,6 +323,8 @@ def cmd_convert_weights(force: bool = False):
         print(f"Converted weights already exist: {output_path}")
         print("Use --force to regenerate.")
         return
+
+    import torch
 
     print("Downloading Kokoro-82M weights from HuggingFace...")
     model_path = hf_hub_download("hexgrad/Kokoro-82M", "kokoro-v1_0.pth")
@@ -372,8 +358,6 @@ def cmd_convert_weights(force: bool = False):
     }
 
     # Also save config alongside
-    import shutil
-
     config_out = TRAINING_DIR / "config.json"
     shutil.copy2(config_path, config_out)
 
@@ -391,8 +375,8 @@ def cmd_patch_styletts2():
 
     This is CRITICAL: Kokoro and StyleTTS2 use the same 178 tokens but with
     different index assignments. If we don't fix this, the pre-trained
-    embeddings will be scrambled (e.g., the model would think the German
-    affricate ʦ is the letter D).
+    embeddings will be scrambled (e.g., the model would think the French
+    nasal ɑ̃ is the letter D).
 
     This command generates a drop-in replacement for StyleTTS2's symbol
     mapping that matches Kokoro-82M's config.json exactly.
@@ -602,7 +586,6 @@ def cmd_verify():
     weights_path = TRAINING_DIR / "kokoro_base.pth"
     if weights_path.exists():
         import torch
-
         state = torch.load(weights_path, map_location="cpu", weights_only=True)
         print(f"  Base weights  : OK ({list(state.keys())})")
     else:
