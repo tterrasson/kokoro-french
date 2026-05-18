@@ -873,6 +873,8 @@ def main(config_path, run_name):
         writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch + 1)
         writer.add_scalar("eval/dur_loss", loss_align / iters_test, epoch + 1)
         writer.add_scalar("eval/F0_loss", loss_f / iters_test, epoch + 1)
+        for _k, _opt in optimizer.optimizers.items():
+            writer.add_scalar(f"lr/{_k}", _opt.param_groups[0]["lr"], epoch + 1)
 
         if epoch % saving_epoch == 0:
             if (loss_test / iters_test) < best_loss:

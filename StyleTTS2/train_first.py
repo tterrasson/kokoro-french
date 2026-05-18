@@ -557,6 +557,8 @@ def main(config_path, run_name):
             assert s2s_attn is not None
 
             writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch + 1)
+            for _k, _opt in optimizer.optimizers.items():
+                writer.add_scalar(f"lr/{_k}", _opt.param_groups[0]["lr"], epoch + 1)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure("eval/attn", attn_image, epoch)
 
