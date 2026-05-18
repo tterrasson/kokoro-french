@@ -65,14 +65,19 @@ espeakng_loader.make_library_available()
 
 @click.command()
 @click.option("-p", "--config_path", default="Configs/config.yml", type=str)
-def main(config_path):
+@click.option("-n", "--run_name", default=None, type=str, help="Run name for TensorBoard (defaults to timestamp)")
+def main(config_path, run_name):
     config = yaml.safe_load(open(config_path))
 
     log_dir = config["log_dir"]
     if not osp.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
+
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
-    writer = SummaryWriter(log_dir + "/tensorboard")
+
+    if run_name is None:
+        run_name = time.strftime("%Y%m%d_%H%M%S")
+    writer = SummaryWriter(osp.join(log_dir, "tensorboard", run_name))
 
     # write logs
     file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
@@ -204,9 +209,11 @@ def main(config_path):
         clamp=False,
     )
 
+    grad_clip = float(getattr(optimizer_params, "grad_clip", 5.0))
     scheduler_params = {
         "max_lr": optimizer_params.lr,
-        "pct_start": float(0),
+        "pct_start": float(getattr(optimizer_params, "pct_start", 0.0)),
+        "final_div_factor": float(getattr(optimizer_params, "final_div_factor", 10)),
         "epochs": epochs,
         "steps_per_epoch": max(1, len(train_dataloader) // grad_accum),
     }
@@ -520,6 +527,9 @@ def main(config_path):
                 d_loss = dl(wav.detach(), y_rec.detach()).mean() / grad_accum
                 d_loss.backward()
                 if is_update_step:
+                    torch.nn.utils.clip_grad_norm_(
+                        list(model["msd"].parameters()) + list(model["mpd"].parameters()), grad_clip
+                    )
                     optimizer.step("msd")
                     optimizer.step("mpd")
             else:
@@ -574,6 +584,14 @@ def main(config_path):
             (g_loss / grad_accum).backward()
 
             if is_update_step:
+                gen_keys = ["bert_encoder", "bert", "predictor", "predictor_encoder"]
+                if epoch >= diff_epoch:
+                    gen_keys.append("diffusion")
+                if epoch >= joint_epoch:
+                    gen_keys += ["style_encoder", "decoder"]
+                torch.nn.utils.clip_grad_norm_(
+                    [p for k in gen_keys if k in model for p in model[k].parameters()], grad_clip
+                )
                 optimizer.step("bert_encoder")
                 optimizer.step("bert")
                 optimizer.step("predictor")

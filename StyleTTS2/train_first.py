@@ -51,13 +51,16 @@ espeakng_loader.make_library_available()
 
 @click.command()
 @click.option("-p", "--config_path", default="Configs/config.yml", type=str)
-def main(config_path):
+@click.option("-n", "--run_name", default=None, type=str, help="Run name for TensorBoard (defaults to timestamp)")
+def main(config_path, run_name):
     config = yaml.safe_load(open(config_path))
 
     log_dir = config["log_dir"]
     if not osp.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
+
     shutil.copy(config_path, osp.join(log_dir, osp.basename(config_path)))
+
     grad_accum = config.get("grad_accum", 1)
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
@@ -66,9 +69,13 @@ def main(config_path):
         gradient_accumulation_steps=grad_accum,
         kwargs_handlers=[ddp_kwargs],
     )
+
+    if run_name is None:
+        run_name = time.strftime("%Y%m%d_%H%M%S")
+
     writer: SummaryWriter | None = None
     if accelerator.is_main_process:
-        writer = SummaryWriter(log_dir + "/tensorboard")
+        writer = SummaryWriter(osp.join(log_dir, "tensorboard", run_name))
 
     # write logs
     file_handler = logging.FileHandler(osp.join(log_dir, "train.log"))
@@ -136,9 +143,11 @@ def main(config_path):
         BERT_path = config.get("PLBERT_dir", False)
         plbert = load_plbert(BERT_path)
 
+    grad_clip = float(config["optimizer_params"].get("grad_clip", 5.0))
     scheduler_params = {
         "max_lr": float(config["optimizer_params"].get("lr", 1e-4)),
         "pct_start": float(config["optimizer_params"].get("pct_start", 0.0)),
+        "final_div_factor": float(config["optimizer_params"].get("final_div_factor", 10)),
         "epochs": epochs,
         "steps_per_epoch": max(1, len(train_dataloader) // grad_accum),
     }
@@ -356,6 +365,9 @@ def main(config_path):
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean() / grad_accum
                 accelerator.backward(d_loss)
                 if is_update_step:
+                    accelerator.clip_grad_norm_(
+                        list(model["msd"].parameters()) + list(model["mpd"].parameters()), grad_clip
+                    )
                     optimizer.step("msd")
                     optimizer.step("mpd")
             else:
@@ -403,6 +415,12 @@ def main(config_path):
             accelerator.backward(g_loss / grad_accum)
 
             if is_update_step:
+                gen_keys = ["text_encoder", "style_encoder", "decoder"]
+                if epoch >= TMA_epoch:
+                    gen_keys += ["text_aligner", "pitch_extractor"]
+                accelerator.clip_grad_norm_(
+                    [p for k in gen_keys for p in model[k].parameters()], grad_clip
+                )
                 optimizer.step("text_encoder")
                 optimizer.step("style_encoder")
                 optimizer.step("decoder")
@@ -532,9 +550,9 @@ def main(config_path):
         if accelerator.is_main_process:
             print("Epochs:", epoch + 1)
             log_print(
-                "Validation loss: %.3f" % (loss_test / iters_test) + "\n\n\n\n", logger
+                "Validation loss: %.3f" % (loss_test / iters_test), logger
             )
-            print("\n\n\n")
+            print("\n\n")
             assert writer is not None
             assert s2s_attn is not None
 

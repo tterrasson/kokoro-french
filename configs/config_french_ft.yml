@@ -113,9 +113,12 @@ loss_params:
 
 # ── Optimizer ────────────────────────────────────────────────────────────────
 optimizer_params:
-  lr: 0.0001                        # main learning rate
-  bert_lr: 0.00001                  # lower LR for PLBERT (mostly frozen knowledge)
-  ft_lr: 0.0001                     # fine-tuning LR for acoustic modules
+  lr: 0.00008                       # main learning rate
+  bert_lr: 0.000008                 # lower LR for PLBERT (mostly frozen knowledge)
+  ft_lr: 0.00008                    # fine-tuning LR for acoustic modules
+  pct_start: 0.0                    # no warmup (fine-tuning from pretrained)
+  final_div_factor: 10              # LR decays 10x by end of training (7e-5 → 7e-6)
+  grad_clip: 5.0                    # max gradient norm to prevent spikes
 
 # ── Pitch Extractor ──────────────────────────────────────────────────────────
 # StyleTTS2 uses JDC pitch extractor

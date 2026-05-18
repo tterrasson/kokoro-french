@@ -1,10 +1,5 @@
 #coding:utf-8
-import os, sys
-import os.path as osp
-import numpy as np
 import torch
-from torch import nn
-from torch.optim import Optimizer
 from functools import reduce
 from torch.optim import AdamW
 
@@ -24,7 +19,7 @@ class MultiOptimizer:
         for key, val in state_dict:
             try:
                 self.optimizers[key].load_state_dict(val)
-            except:
+            except Exception:
                 print("Unloaded %s" % key)
 
     def step(self, key=None, scaler=None):
@@ -58,7 +53,8 @@ def define_scheduler(optimizer, params):
         steps_per_epoch=params.get('steps_per_epoch', 1000),
         pct_start=params.get('pct_start', 0.0),
         div_factor=1,
-        final_div_factor=1)
+        final_div_factor=params.get('final_div_factor', 10)
+    )
 
     return scheduler
 
@@ -70,4 +66,5 @@ def build_optimizer(parameters_dict, scheduler_params_dict, lr):
                        for key, opt in optim.items()])
 
     multi_optim = MultiOptimizer(optim, schedulers)
+
     return multi_optim

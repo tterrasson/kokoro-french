@@ -550,7 +550,7 @@ def cmd_filter(skip_snr: bool = False):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def cmd_cluster():
+def cmd_cluster(n_speakers=None, min_speakers=2, distance_threshold=None):
     """Extract speaker embeddings and cluster into distinct Polly voices."""
     if not FILTERED_FILE.exists():
         print("No filtered.jsonl found. Run: filter first.")
@@ -602,7 +602,7 @@ def cmd_cluster():
     embeddings = np.array(embeddings, dtype=np.float32)
 
     print(f"Clustering {len(embeddings)} embeddings...")
-    n_speakers, labels = _cluster_embeddings(embeddings)
+    n_speakers, labels = _cluster_embeddings(embeddings, n_speakers=n_speakers, min_speakers=min_speakers, distance_threshold=distance_threshold)
     print(f"Detected {n_speakers} distinct speaker(s)")
 
     path_to_speaker: dict[str, str] = {}
@@ -672,18 +672,34 @@ def cmd_cluster():
     print(rename_example)
 
 
-def _cluster_embeddings(embeddings):
+def _cluster_embeddings(embeddings, n_speakers=None, min_speakers=2, distance_threshold=None):
     """Auto-cluster speaker embeddings. Returns (n_speakers, labels array)."""
+    if n_speakers is not None:
+        clustering = AgglomerativeClustering(n_clusters=n_speakers)
+        labels = clustering.fit_predict(embeddings)
+        print(f"Using forced cluster count: {n_speakers}")
+        return n_speakers, labels
+
+    if distance_threshold is not None:
+        clustering = AgglomerativeClustering(
+            n_clusters=None, distance_threshold=distance_threshold, linkage="ward"
+        )
+        labels = clustering.fit_predict(embeddings)
+        n = len(set(labels))
+        print(f"Distance threshold {distance_threshold} → {n} cluster(s)")
+        return n, labels
+
     best_score = -1
     best_n = 1
     best_labels = None
 
-    max_clusters = min(8, len(embeddings) // 10)
+    max_clusters = min(20, len(embeddings) // 10)
+    start = max(2, min_speakers)
 
-    if max_clusters < 2:
+    if max_clusters < start:
         return 1, np.zeros(len(embeddings), dtype=int)
 
-    for n in range(2, max_clusters + 1):
+    for n in range(start, max_clusters + 1):
         clustering = AgglomerativeClustering(n_clusters=n)
         labels = clustering.fit_predict(embeddings)
         try:
@@ -1018,8 +1034,20 @@ def main():
     )
 
     # cluster
-    subparsers.add_parser(
+    p_cluster = subparsers.add_parser(
         "cluster", help="Cluster speakers using ECAPA-TDNN embeddings"
+    )
+    p_cluster.add_argument(
+        "--n-speakers", type=int, default=None, metavar="N",
+        help="Force exact number of speaker clusters (skips auto-detection)"
+    )
+    p_cluster.add_argument(
+        "--min-speakers", type=int, default=2, metavar="N",
+        help="Minimum number of clusters to consider during auto-detection (default: 2)"
+    )
+    p_cluster.add_argument(
+        "--distance-threshold", type=float, default=None, metavar="D",
+        help="Ward linkage distance cutoff — lower = more clusters (e.g. 0.4–0.8). Skips silhouette search."
     )
 
     # drop
@@ -1064,7 +1092,7 @@ def main():
     elif args.command == "filter":
         cmd_filter(skip_snr=args.skip_snr)
     elif args.command == "cluster":
-        cmd_cluster()
+        cmd_cluster(n_speakers=args.n_speakers, min_speakers=args.min_speakers, distance_threshold=args.distance_threshold)
     elif args.command == "drop":
         cmd_drop(speakers_to_drop=args.speakers)
     elif args.command == "format":
