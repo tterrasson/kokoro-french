@@ -27,7 +27,6 @@ dependencies = [
     "librosa>=0.11.0",
     "loguru",
     "matplotlib>=3.10.9",
-    "misaki>=0.9.4",
     "munch>=4.0.0",
     "numpy",
     "openai-whisper>=20250625",
@@ -54,14 +53,3 @@ only-packages = true
 Homepage = "https://github.com/tterrasson/kokoro-french"
 Repository = "https://github.com/tterrasson/kokoro-french"
 Upstream = "https://github.com/hexgrad/kokoro"
-
-[tool.uv.sources]
-misaki = { git = "https://github.com/semidark/misaki.git", branch = "main" }
-torch = { index = "pytorch-cu124" }
-torchaudio = { index = "pytorch-cu124" }
-torchvision = { index = "pytorch-cu124" }
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
