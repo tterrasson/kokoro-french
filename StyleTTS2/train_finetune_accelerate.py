@@ -284,7 +284,8 @@ def main(config_path):
 
             # compute the style of the entire utterance
             # this operation cannot be done in batch because of the avgpool layer (may need to work on masked avgpool)
-            ss, gs = []
+            ss = []
+            gs = []
             for bib in range(len(mel_input_length)):
                 mel_length = int(mel_input_length[bib].item())
                 mel = mels[bib, :, :mel_input_length[bib]]

@@ -440,7 +440,7 @@ def main(config_path, run_name):
 
             mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
-            en, gt, st, p_en, wav = []
+            en, gt, st, p_en, wav = [], [], [], [], []
 
             for bib in range(len(mel_input_length)):
                 mel_length = int(mel_input_length[bib].item() / 2)
