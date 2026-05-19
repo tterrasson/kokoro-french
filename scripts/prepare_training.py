@@ -9,13 +9,13 @@ Run this on any CUDA/ROCm machine before starting training.
 
 Usage:
     # Step 1: Generate train/val lists and precompute features
-    python scripts/prepare_training.py prepare
+    uv run python scripts/prepare_training.py prepare
 
     # Step 2: Convert Kokoro weights to StyleTTS2 format
-    python scripts/prepare_training.py convert-weights
+    uv run python scripts/prepare_training.py convert-weights
 
     # Step 3: Smoke test (verify data loads correctly)
-    python scripts/prepare_training.py verify
+    uv run python scripts/prepare_training.py verify
 """
 
 import argparse

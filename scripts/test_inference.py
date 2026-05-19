@@ -6,18 +6,18 @@ Tests the fine-tuned Kokoro model with a German phonetic test set.
 
 Usage:
     # Convert checkpoint + run inference
-    python scripts/test_inference.py \
+    uv run python scripts/test_inference.py \
         --checkpoint StyleTTS2/logs/kokoro_german/epoch_1st_00002.pth \
         --voicepack voices/dm_daniel_epoch3.pt \
         --output-dir test_output/epoch3
 
     # Use a previously converted model
-    python scripts/test_inference.py \
+    uv run python scripts/test_inference.py \
         --model voices/kokoro_german_epoch3.pth \
         --voicepack voices/dm_daniel_epoch3.pt
 
     # Run on CPU
-    python scripts/test_inference.py \
+    uv run python scripts/test_inference.py \
         --checkpoint StyleTTS2/logs/kokoro_german/epoch_1st_00002.pth \
         --voicepack voices/dm_daniel_epoch3.pt \
         --device cpu

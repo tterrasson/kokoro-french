@@ -8,21 +8,21 @@ averaging the resulting style vectors.
 
 Usage:
     # Single checkpoint (Stage 1 only — uses style_encoder for both halves)
-    python scripts/extract_voicepack.py \
+    uv run python scripts/extract_voicepack.py \
         --model StyleTTS2/logs/kokoro_german/epoch_1st_00002.pth \
         --audio-dir dataset/audio/dm_daniel \
         --output voices/dm_daniel.pt
 
     # Two checkpoints (recommended after Stage 2 training):
     #   style_encoder from Stage 1, predictor_encoder from Stage 2
-    python scripts/extract_voicepack.py \
+    uv run python scripts/extract_voicepack.py \
         --model StyleTTS2/logs/kokoro_german/epoch_2nd_00001.pth \
         --style-encoder-model StyleTTS2/logs/kokoro_german/epoch_1st_00002.pth \
         --audio-dir dataset/audio/dm_daniel \
         --output voices/dm_daniel.pt
 
     # CPU (slower but works without GPU / while GPU is busy training)
-    python scripts/extract_voicepack.py \
+    uv run python scripts/extract_voicepack.py \
         --model StyleTTS2/logs/kokoro_german/epoch_1st_00002.pth \
         --audio-dir dataset/audio/dm_daniel \
         --output voices/dm_daniel.pt \
