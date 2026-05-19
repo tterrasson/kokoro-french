@@ -23,7 +23,7 @@ dependencies = [
     "einops>=0.8.2",
     "einops-exts>=0.0.4",
     "espeakng-loader>=0.2.4",
-    "huggingface_hub",
+    "huggingface-hub",
     "ipython>=8.39.0",
     "librosa>=0.11.0",
     "loguru",
