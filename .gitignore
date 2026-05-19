@@ -55,6 +55,8 @@ voices/*.pt
 .idea/
 .vscode/
 *.code-workspace
+.claude
+.pi
 
 # ── OS ──────────────────────────────────────────────────────────────────────
 .DS_Store

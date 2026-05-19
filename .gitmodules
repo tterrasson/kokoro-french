@@ -1,4 +1,0 @@
-[submodule "kokoro"]
-	path = kokoro
-	url = https://github.com/semidark/kokoro.git
-	branch = main

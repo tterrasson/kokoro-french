@@ -1,10 +1,8 @@
-# kokoro-deutsch
+# kokoro-français
 
-> [!NOTE]
-> Naming RFC in progress: this repository may be renamed to `kikiri-tts`.
-> Share feedback in Discussion #29: https://github.com/semidark/kokoro-deutsch/discussions/29
+Training recipe for fine-tuning [Kokoro-82M](https://github.com/hexgrad/kokoro) for French with a patched [StyleTTS2](https://github.com/yl4579/StyleTTS2).
 
-Training recipe for fine-tuning [Kokoro-82M](https://github.com/hexgrad/kokoro) for German with a patched [StyleTTS2](https://github.com/yl4579/StyleTTS2) submodule.
+Forked from [semidark/kikiri-tts](https://github.com/semidark/kikiri-tts) and adapted for French.
 
 ## What This Is
 
@@ -20,7 +18,7 @@ Training recipe for fine-tuning [Kokoro-82M](https://github.com/hexgrad/kokoro) 
 
 ## Start Here
 
-### I want to train my own German voice
+### I want to train my own French voice
 
 Start with `docs/TRAINING_GUIDE.md`.
 
@@ -38,25 +36,6 @@ The end-to-end pipeline is working:
 
 `Dataset preparation -> Weight conversion -> Stage 1 -> Stage 2 -> Voicepack extraction -> KModel inference`
 
-## Published Model
-
-### German Multi-Speaker Base Model (Stage 1)
-
-**dida-80b/kokoro-deutsch-hui-base** is available on HuggingFace.
-
-| Specification | Value |
-|---|---|
-| Speakers | 51 (24M / 27F) |
-| Training Audio | ~51 hours (effective) |
-| Train Samples | 20,495 |
-| Val Samples | 418 |
-| Final Mel Loss | 0.3264 |
-| License | CC0-1.0 |
-| Model | [dida-80b/kokoro-deutsch-hui-base](https://huggingface.co/dida-80b/kokoro-deutsch-hui-base) |
-| Dataset | [dida-80b/hui-german-51speakers](https://huggingface.co/datasets/dida-80b/hui-german-51speakers) |
-
-This is a base model, not a finished single-speaker voice.
-
 ## Quick Setup
 
 ### Prerequisites
@@ -72,8 +51,8 @@ brew install espeak-ng libsndfile
 ### Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/semidark/kokoro-deutsch
-cd kokoro-deutsch
+git clone https://github.com/tterrasson/kokoro-french
+cd kokoro-french
 uv sync
 ```
 
@@ -93,8 +72,8 @@ training/            # Local training artifacts metadata (audio excluded)
 Contributions are welcome, especially:
 
 - Reproducible runs on public datasets
-- Fine-tuning recipes for other languages
 - Training stability and quality improvements
+- French dataset contributions
 
 ## Attribution
 
