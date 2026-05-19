@@ -255,7 +255,7 @@ def main(config_path, run_name):
         )
         # Ensure all modules are in train() mode after loading
         # (load_checkpoint sets them to eval(), which breaks spectral_norm)
-        _ = [model[key].train() for key in model]
+        [model[key].train() for key in model]
 
         # Initialize predictor_encoder from trained style_encoder
         # (predictor_encoder is not trained in Stage 1)
@@ -280,7 +280,6 @@ def main(config_path, run_name):
     print("decoder", optimizer.optimizers["decoder"])
 
     start_ds = False
-
     running_std = []
 
     slmadv_params = Munch(config["slmadv_params"])
@@ -309,7 +308,7 @@ def main(config_path, run_name):
         )
 
     # Generate Stage 1 baseline before any training updates
-    _ = [model[key].eval() for key in model]
+    [model[key].eval() for key in model]
     logger.info("Extracting Stage 1 baseline voicepack for TensorBoard...")
     _baseline_voicepack, _baseline_acoustic_norm, _baseline_prosodic_norm = (
         extract_voicepack(
@@ -331,7 +330,8 @@ def main(config_path, run_name):
         for i, (text, audio) in enumerate(_baseline_audio):
             writer.add_audio(f"baseline/test_{i + 1:02d}", audio, 0, sample_rate=sr)
             logger.info(f"  baseline/test_{i + 1:02d}: {text[:60]}")
-    _ = [model[key].train() for key in model]
+
+    [model[key].train() for key in model]
     # ─────────────────────────────────────────────────────────────────────────
 
     for epoch in range(start_epoch, epochs):
@@ -454,11 +454,7 @@ def main(config_path, run_name):
 
             mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
-            en = []
-            gt = []
-            st = []
-            p_en = []
-            wav = []
+            en, gt, st, p_en, wav = []
 
             for bib in range(len(mel_input_length)):
                 mel_length = int(mel_input_length[bib].item() / 2)
@@ -900,7 +896,7 @@ def main(config_path, run_name):
                     yaml.dump(config, outfile, default_flow_style=True)
 
         # ── Kokoro-faithful TensorBoard inference (every epoch) ───────────────
-        _ = [model[key].eval() for key in model]
+        [model[key].eval() for key in model]
         logger.info(f"Epoch {epoch}: extracting voicepack for TensorBoard inference...")
         _vp, _acoustic_norm, _prosodic_norm = extract_voicepack(
             model,
@@ -921,7 +917,8 @@ def main(config_path, run_name):
                 writer.add_audio(
                     f"inference/test_{i + 1:02d}", audio, epoch + 1, sample_rate=sr
                 )
-        _ = [model[key].train() for key in model]
+
+        [model[key].train() for key in model]
         # ─────────────────────────────────────────────────────────────────────
 
 

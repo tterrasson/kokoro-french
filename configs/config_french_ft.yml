@@ -1,5 +1,5 @@
 batch_size: 3
-grad_accum: 2
+grad_accum: 3
 epochs: 10
 epochs_1st: 10
 epochs_2nd: 10
@@ -48,7 +48,7 @@ model_params:
   hidden_dim: 512                   # model hidden dimension
   style_dim: 128                    # style/speaker embedding dimension (x2 = 256 total in voicepack)
   max_dur: 50                       # max duration per phoneme (in frames)
-  multispeaker: true                # single speaker fine-tuning
+  multispeaker: true                # multi speaker fine-tuning
   n_mels: 80                        # mel spectrogram bands
   dropout: 0.2
   n_layer: 3                        # number of layers in text encoder / predictor
