@@ -13,16 +13,14 @@ import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
-from munch import Munch
-from torch.utils.tensorboard.writer import SummaryWriter
-
-from Utils.PLBERT.util import load_plbert
 from kokoro_symbols import TextCleaner
 from kokoro_tb_utils import extract_voicepack, prepare_test_tokens, run_kokoro_inference
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
+from munch import Munch
 from optimizers import build_optimizer
+from torch.utils.tensorboard.writer import SummaryWriter
 from utils import (
     get_data_path_list,
     get_image,
@@ -33,6 +31,7 @@ from utils import (
     maximum_path,
     recursive_munch,
 )
+from Utils.PLBERT.util import load_plbert
 
 if getattr(torch, "_original_load", None) is None:
     torch._original_load = torch.load
@@ -164,7 +163,7 @@ def main(config_path, run_name):
         train_dataloader, val_dataloader
     )
 
-    _ = [model[key].to(device) for key in model]
+    [model[key].to(device) for key in model]
 
     # initialize optimizers after preparing models for compatibility with FSDP
     optimizer = build_optimizer(
