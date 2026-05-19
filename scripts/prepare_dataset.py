@@ -37,7 +37,6 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-import espeakng_loader
 import numpy as np
 import whisper
 from misaki import espeak
@@ -46,8 +45,6 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
-os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
-espeakng_loader.make_library_available()
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 RAW_DIR = Path("./raw")   # input dir for long raw recordings (step 0)

@@ -1,13 +1,20 @@
-from phonemizer.backend.espeak.wrapper import EspeakWrapper
-from typing import Tuple
-import espeakng_loader
-import phonemizer
 import re
+import sys
+import types
+from typing import Tuple
 
-# Set espeak-ng library path and espeak-ng-data
+# phonemizer eagerly imports SegmentsBackend which pulls in segments→csvw→rdflib,
+# none of which support Python 3.14. We only use EspeakBackend so stub them out.
+for _m in ('segments', 'segments.tokenizer'):
+    sys.modules.setdefault(_m, types.ModuleType(_m))
+
+import espeakng_loader
+from phonemizer.backend.espeak.espeak import EspeakBackend
+from phonemizer.backend.espeak.wrapper import EspeakWrapper
+
+# Make the bundled espeak-ng shared library loadable, then point phonemizer at it
+espeakng_loader.make_library_available()
 EspeakWrapper.set_library(espeakng_loader.get_library_path())
-# Change data_path as needed when editing espeak-ng phonemes
-EspeakWrapper.set_data_path(espeakng_loader.get_data_path())
 
 # EspeakFallback is used as a last resort for English
 class EspeakFallback:
@@ -31,7 +38,7 @@ class EspeakFallback:
     def __init__(self, british, version=None):
         self.british = british
         self.version = version
-        self.backend = phonemizer.backend.EspeakBackend(
+        self.backend = EspeakBackend(
             language=f"en-{'gb' if british else 'us'}",
             preserve_punctuation=True, with_stress=True, tie='^'
         )
@@ -64,7 +71,7 @@ class EspeakG2P:
     def __init__(self, language, version=None):
         self.language = language
         self.version = version
-        self.backend = phonemizer.backend.EspeakBackend(
+        self.backend = EspeakBackend(
             language=language, preserve_punctuation=True, with_stress=True,
             tie='^', language_switch='remove-flags'
         )

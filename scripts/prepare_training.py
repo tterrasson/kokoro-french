@@ -20,20 +20,15 @@ Usage:
 
 import argparse
 import json
-import os
 import random
 import shutil
 import sys
 from pathlib import Path
 
-import espeakng_loader
 import numpy as np
 from huggingface_hub import hf_hub_download
 from misaki import espeak
 from tqdm import tqdm
-
-os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
-espeakng_loader.make_library_available()
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 

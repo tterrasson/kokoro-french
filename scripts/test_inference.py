@@ -25,13 +25,7 @@ Usage:
 
 import argparse
 import sys
-import os
 from pathlib import Path
-import espeakng_loader
-
-
-os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
-espeakng_loader.make_library_available()
 
 # Prefer the kokoro submodule over any pip-installed kokoro package
 _repo_root = Path(__file__).resolve().parents[1]

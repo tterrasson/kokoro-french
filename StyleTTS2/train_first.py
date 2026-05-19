@@ -7,7 +7,6 @@ import time
 import warnings
 
 import click
-import espeakng_loader
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -45,9 +44,6 @@ warnings.simplefilter("ignore")
 
 logger = get_logger(__name__, log_level="DEBUG")
 
-
-os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
-espeakng_loader.make_library_available()
 
 @click.command()
 @click.option("-p", "--config_path", default="Configs/config.yml", type=str)

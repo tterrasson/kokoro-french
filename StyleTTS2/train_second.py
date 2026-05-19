@@ -9,7 +9,6 @@ import warnings
 from logging import StreamHandler
 
 import click
-import espeakng_loader
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -57,10 +56,6 @@ logger.setLevel(logging.DEBUG)
 handler = StreamHandler()
 handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
-
-
-os.environ["ESPEAK_DATA_PATH"] = espeakng_loader.get_data_path()
-espeakng_loader.make_library_available()
 
 
 @click.command()

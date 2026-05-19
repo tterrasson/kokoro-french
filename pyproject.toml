@@ -17,11 +17,12 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent"
 ]
-requires-python = ">=3.10, <3.14"
+requires-python = ">=3.10, <3.15"
 dependencies = [
     "accelerate>=1.13.0",
     "einops>=0.8.2",
     "einops-exts>=0.0.4",
+    "espeakng-loader>=0.2.4",
     "huggingface_hub",
     "ipython>=8.39.0",
     "librosa>=0.11.0",
@@ -35,8 +36,8 @@ dependencies = [
     "resemblyzer>=0.1.4",
     "soundfile>=0.13.1",
     "tensorboard>=2.20.0",
-    "torch==2.6.0",
-    "torchaudio==2.6.0",
+    "torch==2.12.0",
+    "torchaudio==2.11.0",
     "torchvision",
     "transformers",
 ]
@@ -45,9 +46,14 @@ dependencies = [
 kokoro = "kokoro.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["kokoro/kokoro"]
-sources = ["kokoro"]
-only-packages = true
+packages = ["kokoro/kokoro", "misaki"]
+
+[tool.uv]
+override-dependencies = [
+    "lxml>=5.4.0",
+    "rpds-py>=0.23.0",
+    "rdflib>=7.1.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/tterrasson/kokoro-french"
