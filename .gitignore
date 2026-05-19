@@ -41,7 +41,8 @@ StyleTTS2/logs/
 test_output/
 
 # ── Voicepacks (derived from non-redistributable data) ─────────────────────
-voices/*.pt
+**/voices/*.pt
+**/voices/*.bin
 
 # ── Backup and temp files ───────────────────────────────────────────────────
 *.bak
