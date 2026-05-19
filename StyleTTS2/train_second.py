@@ -614,6 +614,15 @@ def main(config_path, run_name):
                     slm_out = None
 
                 if slm_out is None:
+                    iters = iters + 1
+                    if (i + 1) % log_interval == 0:
+                        reason = "no-update-step" if not is_update_step else "no-valid-clips"
+                        logger.info(
+                            f"Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_list) // batch_size}]"
+                            f", Loss: {running_loss / log_interval:.5f} [slmadv skipped: {reason}]"
+                        )
+                        running_loss = 0
+                        print("Time elasped:", time.time() - start_time)
                     continue
 
                 d_loss_slm, loss_gen_lm, y_pred = slm_out

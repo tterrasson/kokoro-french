@@ -8,11 +8,15 @@ from typing import Tuple
 for _m in ('segments', 'segments.tokenizer'):
     sys.modules.setdefault(_m, types.ModuleType(_m))
 
+import os
 import espeakng_loader
 from phonemizer.backend.espeak.espeak import EspeakBackend
 from phonemizer.backend.espeak.wrapper import EspeakWrapper
 
-# Make the bundled espeak-ng shared library loadable, then point phonemizer at it
+# Make the bundled espeak-ng shared library loadable, then point phonemizer at it.
+# ESPEAK_DATA_PATH must be set before the library initializes — the compiled .so
+# has a hardcoded CI build path (/home/runner/work/...) that doesn't exist locally.
+os.environ.setdefault("ESPEAK_DATA_PATH", espeakng_loader.get_data_path())
 espeakng_loader.make_library_available()
 EspeakWrapper.set_library(espeakng_loader.get_library_path())
 
