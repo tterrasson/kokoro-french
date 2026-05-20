@@ -29,7 +29,6 @@ Usage:
 
 import argparse
 import json
-import os
 import random
 import re
 import subprocess
@@ -87,8 +86,11 @@ LOUDNORM_TARGET_LRA = 11.0  # loudness range target (LU) — preserves dynamics
 
 # ── Light denoising (applied before loudnorm when --no-denoise is not set) ───
 
-DENOISE_HIGHPASS_HZ = 80    # cut sub-bass hum / 50–60 Hz electrical noise; speech fundamentals start at ~85 Hz
+DENOISE_HIGHPASS_HZ = 60    # cut sub-bass hum / 50–60 Hz electrical noise; 60 Hz preserves male vocal fundamentals (80–130 Hz)
 DENOISE_AFFTDN_NF = -30     # afftdn noise floor estimate (dB) — lower = more conservative; -30 is gentle
+# NOTE: afftdn estimates noise from the first frames of each clip. On pre-segmented audio that starts
+# directly with speech, it mistakes voiced frames for noise and attenuates speech harmonics (musical
+# noise). Only enable --denoise when the source has audible background hum (not for clean Polly output).
 
 # ── Whisper model ─────────────────────────────────────────────────────────────
 
@@ -113,7 +115,7 @@ def cmd_segment(
     silence_min_s: float = SILENCE_MIN_S,
     rng_seed: int = 42,
     normalize: bool = True,
-    denoise: bool = True,
+    denoise: bool = False,
 ):
     """Cut long audio files into prosody-respecting segments (varied 2–30 s)."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +157,7 @@ def cmd_segment(
             if seg_dur < SEG_MIN_S:
                 seg_start = seg_end
                 continue
-            out_path = output_dir / f"{stem}_{idx:04d}.mp3"
+            out_path = output_dir / f"{stem}_{idx:04d}.flac"
             if not out_path.exists():
                 _cut_segment(src, seg_start, seg_end, out_path, normalize=normalize, denoise=denoise)
             total_segs += 1
@@ -165,7 +167,7 @@ def cmd_segment(
         # Trailing remainder
         remainder = duration - seg_start
         if remainder >= SEG_MIN_S:
-            out_path = output_dir / f"{stem}_{len(cut_points):04d}.mp3"
+            out_path = output_dir / f"{stem}_{len(cut_points):04d}.flac"
             if not out_path.exists():
                 _cut_segment(src, seg_start, duration, out_path, normalize=normalize, denoise=denoise)
             total_segs += 1
@@ -248,16 +250,16 @@ def _cut_segment(
     end: float,
     dst: Path,
     normalize: bool = True,
-    denoise: bool = True,
+    denoise: bool = False,
 ):
-    """Extract [start, end] seconds from src into dst.
+    """Extract [start, end] seconds from src into dst (FLAC when dst.suffix == .flac).
 
-    With normalize=True applies a light denoising chain then EBU R128 loudnorm:
-      highpass=f=80  →  removes sub-bass hum / 50–60 Hz electrical noise
-      afftdn=nf=-30  →  conservative adaptive FFT denoising (gentle on voice)
-      loudnorm       →  EBU R128 integrated loudness normalisation
+    With normalize=True applies EBU R128 loudnorm, optionally preceded by light denoising:
+      highpass=f=60  →  removes sub-bass hum / 50–60 Hz electrical noise
+      afftdn=nf=-30  →  conservative adaptive FFT denoising (only with denoise=True)
+      loudnorm       →  EBU R128 integrated loudness normalisation (linear gain, no DRC)
 
-    With denoise=False, only loudnorm is applied (no spectral processing).
+    With denoise=False (default), only loudnorm is applied — safe for clean Polly output.
     With normalize=False, stream copy is used (fastest, no audio modification).
     """
     if normalize:
@@ -279,8 +281,6 @@ def _cut_segment(
             "-to", f"{end:.3f}",
             "-i", str(src),
             "-af", af,
-            "-acodec", "libmp3lame",
-            "-q:a", "2",
             str(dst),
         ]
     else:
@@ -312,8 +312,8 @@ def cmd_transcribe(sample: int | None, model_name: str = WHISPER_MODEL):
                 entry = json.loads(line)
                 done.add(entry["hash"])
 
-    # Collect all MP3 files
-    all_files = sorted(CACHE_DIR.glob("**/*.mp3"))
+    # Collect all audio files (FLAC from segment step, or raw MP3 from Polly cache)
+    all_files = sorted(p for p in CACHE_DIR.glob("**/*") if p.suffix.lower() in _AUDIO_EXTS)
     if sample:
         all_files = all_files[:sample]
 
@@ -808,16 +808,12 @@ def cmd_format(rename_speakers: list[str] | None):
 
         result = subprocess.run(
             [
-                "ffmpeg",
-                "-y",
-                "-i",
-                entry["path"],
-                "-ac",
-                "1",
-                "-ar",
-                "24000",
-                "-sample_fmt",
-                "s16",
+                "ffmpeg", "-y",
+                "-i", entry["path"],
+                "-af", "aresample=resampler=soxr:precision=28",
+                "-ac", "1",
+                "-ar", "24000",
+                "-sample_fmt", "s16",
                 str(wav_path),
             ],
             capture_output=True,
