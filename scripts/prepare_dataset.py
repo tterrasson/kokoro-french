@@ -40,8 +40,8 @@ import numpy as np
 import whisper
 from misaki import espeak
 from resemblyzer import VoiceEncoder, preprocess_wav
+from scipy.cluster.hierarchy import fcluster, linkage
 from sklearn.cluster import AgglomerativeClustering
-from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -670,7 +670,15 @@ def cmd_cluster(n_speakers=None, min_speakers=2, distance_threshold=None):
 
 
 def _cluster_embeddings(embeddings, n_speakers=None, min_speakers=2, distance_threshold=None):
-    """Auto-cluster speaker embeddings. Returns (n_speakers, labels array)."""
+    """Auto-cluster speaker embeddings. Returns (n_speakers, labels array).
+
+    Auto-detection uses Ward linkage + largest-gap heuristic:
+    for each candidate k, gap = Z[n-k, 2] - Z[n-k-1, 2] measures how much
+    Ward distance is gained by merging the k-th cluster pair. A large gap
+    means k clusters are naturally well-separated in embedding space.
+    This is more reliable than silhouette for Polly voices, which can have
+    uneven cluster sizes and subtle inter-voice similarity.
+    """
     if n_speakers is not None:
         clustering = AgglomerativeClustering(n_clusters=n_speakers)
         labels = clustering.fit_predict(embeddings)
@@ -686,33 +694,29 @@ def _cluster_embeddings(embeddings, n_speakers=None, min_speakers=2, distance_th
         print(f"Distance threshold {distance_threshold} → {n} cluster(s)")
         return n, labels
 
-    best_score = -1
-    best_n = 1
-    best_labels = None
-
-    max_clusters = min(20, len(embeddings) // 10)
+    Z = linkage(embeddings, method="ward")
+    n_pts = len(embeddings)
+    max_search = min(50, n_pts - 1)
     start = max(2, min_speakers)
 
-    if max_clusters < start:
-        return 1, np.zeros(len(embeddings), dtype=int)
+    if max_search < start:
+        return 1, np.zeros(n_pts, dtype=int)
 
-    for n in range(start, max_clusters + 1):
-        clustering = AgglomerativeClustering(n_clusters=n)
-        labels = clustering.fit_predict(embeddings)
-        try:
-            score = silhouette_score(embeddings, labels)
-        except Exception:
-            continue
-        if score > best_score:
-            best_score = score
-            best_n = n
-            best_labels = labels
+    gaps = [
+        (k, float(Z[n_pts - k, 2] - Z[n_pts - k - 1, 2]))
+        for k in range(start, max_search + 1)
+    ]
+    ranked = sorted(gaps, key=lambda x: -x[1])
+    best_n = ranked[0][0]
 
-    if best_labels is None:
-        return 1, np.zeros(len(embeddings), dtype=int)
+    print("Top cluster candidates (Ward gap — larger = more natural boundary):")
+    for k, gap in ranked[:10]:
+        marker = " ← recommended" if k == best_n else ""
+        print(f"  n={k:3d}  gap={gap:.4f}{marker}")
+    print("Tip: use --n-speakers to override if the result looks wrong.")
 
-    print(f"Best cluster count: {best_n} (silhouette score: {best_score:.3f})")
-    return best_n, best_labels
+    labels = fcluster(Z, best_n, criterion="maxclust") - 1  # 0-indexed
+    return best_n, labels
 
 
 def _write_speakers_single(entries):
