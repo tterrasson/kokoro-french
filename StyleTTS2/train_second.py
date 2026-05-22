@@ -344,6 +344,21 @@ def main(config_path, run_name):
                 ref_mels,
             ) = batch
 
+            # grad-accum window bookkeeping: zero grads at the window start before
+            # any `continue`, so a skipped micro-batch can never leave already-stepped
+            # grads to be re-applied (contamination) on the next window
+            is_update_step = (i + 1) % grad_accum == 0 or (i + 1) == len(train_dataloader)
+            # actual micro-batch count for this window (the last window of the epoch
+            # may be shorter than grad_accum) so the loss average is correctly weighted
+            accum_steps = min(grad_accum, len(train_dataloader) - (i // grad_accum) * grad_accum)
+            if i % grad_accum == 0:
+                if start_ds:
+                    optimizer.optimizers["msd"].zero_grad()
+                    optimizer.optimizers["mpd"].zero_grad()
+                for _k in ["bert_encoder", "bert", "predictor", "predictor_encoder", "diffusion", "style_encoder", "decoder"]:
+                    if _k in optimizer.optimizers:
+                        optimizer.optimizers[_k].zero_grad()
+
             with torch.no_grad():
                 mask = length_to_mask(mel_input_length // (2**n_down)).to(device)
                 text_mask = length_to_mask(input_lengths).to(texts.device)
@@ -500,13 +515,8 @@ def main(config_path, run_name):
             loss_F0_rec = (F.smooth_l1_loss(F0_real, F0_fake)) / 10
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
 
-            is_update_step = (i + 1) % grad_accum == 0 or (i + 1) == len(train_dataloader)
-
             if start_ds:
-                if i % grad_accum == 0:
-                    optimizer.optimizers["msd"].zero_grad()
-                    optimizer.optimizers["mpd"].zero_grad()
-                d_loss = dl(wav.detach(), y_rec.detach()).mean() / grad_accum
+                d_loss = dl(wav.detach(), y_rec.detach()).mean() / accum_steps
                 d_loss.backward()
                 if is_update_step:
                     torch.nn.utils.clip_grad_norm_(
@@ -516,12 +526,6 @@ def main(config_path, run_name):
                     optimizer.step("mpd")
             else:
                 d_loss = 0
-
-            # generator loss — separate accumulation buffer from disc
-            if i % grad_accum == 0:
-                for _k in ["bert_encoder", "bert", "predictor", "predictor_encoder", "diffusion", "style_encoder", "decoder"]:
-                    if _k in optimizer.optimizers:
-                        optimizer.optimizers[_k].zero_grad()
 
             loss_mel = stft_loss(y_rec, wav)
             if start_ds:
@@ -563,7 +567,7 @@ def main(config_path, run_name):
             )
 
             running_loss += loss_mel.item()
-            (g_loss / grad_accum).backward()
+            (g_loss / accum_steps).backward()
 
             if is_update_step:
                 gen_keys = ["bert_encoder", "bert", "predictor", "predictor_encoder"]
@@ -864,8 +868,6 @@ def main(config_path, run_name):
         writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch + 1)
         writer.add_scalar("eval/dur_loss", loss_align / iters_test, epoch + 1)
         writer.add_scalar("eval/F0_loss", loss_f / iters_test, epoch + 1)
-        for _k, _opt in optimizer.optimizers.items():
-            writer.add_scalar(f"lr/{_k}", _opt.param_groups[0]["lr"], epoch + 1)
 
         if epoch % saving_epoch == 0:
             if (loss_test / iters_test) < best_loss:

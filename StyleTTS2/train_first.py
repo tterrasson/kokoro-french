@@ -174,7 +174,6 @@ def main(config_path, run_name):
 
     for k, v in optimizer.optimizers.items():
         optimizer.optimizers[k] = accelerator.prepare(optimizer.optimizers[k])
-        optimizer.schedulers[k] = accelerator.prepare(optimizer.schedulers[k])
 
     with accelerator.main_process_first():
         if config.get("pretrained_model", "") != "":
@@ -250,6 +249,19 @@ def main(config_path, run_name):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
+
+            # grad-accum window bookkeeping: zero grads at the window start before
+            # any `continue`, so a skipped micro-batch can never leave already-stepped
+            # grads to be re-applied (contamination) on the next window
+            is_update_step = (i + 1) % grad_accum == 0 or (i + 1) == len(train_dataloader)
+            # actual micro-batch count for this window (the last window of the epoch
+            # may be shorter than grad_accum) so the loss average is correctly weighted
+            accum_steps = min(grad_accum, len(train_dataloader) - (i // grad_accum) * grad_accum)
+            if i % grad_accum == 0:
+                optimizer.optimizers["msd"].zero_grad()
+                optimizer.optimizers["mpd"].zero_grad()
+                for _k in ["text_encoder", "style_encoder", "decoder", "text_aligner", "pitch_extractor"]:
+                    optimizer.optimizers[_k].zero_grad()
 
             with torch.no_grad():
                 mask = length_to_mask(mel_input_length // (2**n_down)).to("cuda")
@@ -349,15 +361,9 @@ def main(config_path, run_name):
 
             y_rec = model.decoder(en, F0_real, real_norm, s)
 
-            is_update_step = (i + 1) % grad_accum == 0 or (i + 1) == len(train_dataloader)
-
             # discriminator loss — accumulate over grad_accum steps, step only at boundary
-            if i % grad_accum == 0:
-                optimizer.optimizers["msd"].zero_grad()
-                optimizer.optimizers["mpd"].zero_grad()
-
             if epoch >= TMA_epoch:
-                d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean() / grad_accum
+                d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean() / accum_steps
                 accelerator.backward(d_loss)
                 if is_update_step:
                     accelerator.clip_grad_norm_(
@@ -367,11 +373,6 @@ def main(config_path, run_name):
                     optimizer.step("mpd")
             else:
                 d_loss = 0
-
-            # generator loss — separate accumulation buffer from disc
-            if i % grad_accum == 0:
-                for _k in ["text_encoder", "style_encoder", "decoder", "text_aligner", "pitch_extractor"]:
-                    optimizer.optimizers[_k].zero_grad()
 
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
@@ -407,7 +408,7 @@ def main(config_path, run_name):
 
             running_loss += accelerator.gather(loss_mel).mean().item()
 
-            accelerator.backward(g_loss / grad_accum)
+            accelerator.backward(g_loss / accum_steps)
 
             if is_update_step:
                 gen_keys = ["text_encoder", "style_encoder", "decoder"]
@@ -552,8 +553,6 @@ def main(config_path, run_name):
             assert s2s_attn is not None
 
             writer.add_scalar("eval/mel_loss", loss_test / iters_test, epoch + 1)
-            for _k, _opt in optimizer.optimizers.items():
-                writer.add_scalar(f"lr/{_k}", _opt.param_groups[0]["lr"], epoch + 1)
             attn_image = get_image(s2s_attn[0].cpu().numpy().squeeze())
             writer.add_figure("eval/attn", attn_image, epoch)
 

@@ -1,5 +1,5 @@
-batch_size: 3
-grad_accum: 3
+batch_size: 2
+grad_accum: 8
 epochs: 10
 epochs_1st: 10
 epochs_2nd: 10
@@ -8,6 +8,7 @@ pretrained_model: "../training/kokoro_base.pth"
 first_stage_path: "first_stage.pth"
 load_only_params: true
 second_stage_load_pretrained: false  # false = load from first_stage.pth (recommended)
+log_interval: 10
 # ─────────────────────────────────────────────────────────────────────────────
 # Kokoro French Fine-Tuning Config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,9 +114,9 @@ loss_params:
 
 # ── Optimizer ────────────────────────────────────────────────────────────────
 optimizer_params:
-  lr: 0.00008                       # main learning rate
-  bert_lr: 0.000008                 # lower LR for PLBERT (mostly frozen knowledge)
-  ft_lr: 0.00008                    # fine-tuning LR for acoustic modules
+  lr: 0.0001                        # main learning rate
+  bert_lr: 0.00001                  # lower LR for PLBERT (mostly frozen knowledge)
+  ft_lr: 0.0001                     # fine-tuning LR for acoustic modules
   pct_start: 0.0                    # no warmup (fine-tuning from pretrained)
   final_div_factor: 10              # LR decays 10x by end of training (7e-5 → 7e-6)
   grad_clip: 5.0                    # max gradient norm to prevent spikes
@@ -135,7 +136,7 @@ ASR_path: "Utils/ASR/epoch_00080.pth"
 PLBERT_dir: "Utils/PLBERT/"
 
 slmadv_params:
-  min_len: 100
+  min_len: 30
   max_len: 500
   batch_percentage: 0.5
   iter: 10
