@@ -29,7 +29,6 @@ Usage:
 
 import argparse
 import json
-import os
 import random
 import re
 import subprocess
@@ -41,8 +40,8 @@ import numpy as np
 import whisper
 from misaki import espeak
 from resemblyzer import VoiceEncoder, preprocess_wav
+from scipy.cluster.hierarchy import fcluster, linkage
 from sklearn.cluster import AgglomerativeClustering
-from sklearn.metrics import silhouette_score
 from tqdm import tqdm
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -87,8 +86,11 @@ LOUDNORM_TARGET_LRA = 11.0  # loudness range target (LU) — preserves dynamics
 
 # ── Light denoising (applied before loudnorm when --no-denoise is not set) ───
 
-DENOISE_HIGHPASS_HZ = 80    # cut sub-bass hum / 50–60 Hz electrical noise; speech fundamentals start at ~85 Hz
+DENOISE_HIGHPASS_HZ = 60    # cut sub-bass hum / 50–60 Hz electrical noise; 60 Hz preserves male vocal fundamentals (80–130 Hz)
 DENOISE_AFFTDN_NF = -30     # afftdn noise floor estimate (dB) — lower = more conservative; -30 is gentle
+# NOTE: afftdn estimates noise from the first frames of each clip. On pre-segmented audio that starts
+# directly with speech, it mistakes voiced frames for noise and attenuates speech harmonics (musical
+# noise). Only enable --denoise when the source has audible background hum (not for clean Polly output).
 
 # ── Whisper model ─────────────────────────────────────────────────────────────
 
@@ -113,7 +115,7 @@ def cmd_segment(
     silence_min_s: float = SILENCE_MIN_S,
     rng_seed: int = 42,
     normalize: bool = True,
-    denoise: bool = True,
+    denoise: bool = False,
 ):
     """Cut long audio files into prosody-respecting segments (varied 2–30 s)."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +157,7 @@ def cmd_segment(
             if seg_dur < SEG_MIN_S:
                 seg_start = seg_end
                 continue
-            out_path = output_dir / f"{stem}_{idx:04d}.mp3"
+            out_path = output_dir / f"{stem}_{idx:04d}.flac"
             if not out_path.exists():
                 _cut_segment(src, seg_start, seg_end, out_path, normalize=normalize, denoise=denoise)
             total_segs += 1
@@ -165,7 +167,7 @@ def cmd_segment(
         # Trailing remainder
         remainder = duration - seg_start
         if remainder >= SEG_MIN_S:
-            out_path = output_dir / f"{stem}_{len(cut_points):04d}.mp3"
+            out_path = output_dir / f"{stem}_{len(cut_points):04d}.flac"
             if not out_path.exists():
                 _cut_segment(src, seg_start, duration, out_path, normalize=normalize, denoise=denoise)
             total_segs += 1
@@ -248,16 +250,16 @@ def _cut_segment(
     end: float,
     dst: Path,
     normalize: bool = True,
-    denoise: bool = True,
+    denoise: bool = False,
 ):
-    """Extract [start, end] seconds from src into dst.
+    """Extract [start, end] seconds from src into dst (FLAC when dst.suffix == .flac).
 
-    With normalize=True applies a light denoising chain then EBU R128 loudnorm:
-      highpass=f=80  →  removes sub-bass hum / 50–60 Hz electrical noise
-      afftdn=nf=-30  →  conservative adaptive FFT denoising (gentle on voice)
-      loudnorm       →  EBU R128 integrated loudness normalisation
+    With normalize=True applies EBU R128 loudnorm, optionally preceded by light denoising:
+      highpass=f=60  →  removes sub-bass hum / 50–60 Hz electrical noise
+      afftdn=nf=-30  →  conservative adaptive FFT denoising (only with denoise=True)
+      loudnorm       →  EBU R128 integrated loudness normalisation (linear gain, no DRC)
 
-    With denoise=False, only loudnorm is applied (no spectral processing).
+    With denoise=False (default), only loudnorm is applied — safe for clean Polly output.
     With normalize=False, stream copy is used (fastest, no audio modification).
     """
     if normalize:
@@ -279,8 +281,6 @@ def _cut_segment(
             "-to", f"{end:.3f}",
             "-i", str(src),
             "-af", af,
-            "-acodec", "libmp3lame",
-            "-q:a", "2",
             str(dst),
         ]
     else:
@@ -300,7 +300,7 @@ def _cut_segment(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def cmd_transcribe(sample: int | None, model_name: str = WHISPER_MODEL):
+def cmd_transcribe(sample: int | None, model_name: str = WHISPER_MODEL, device: str = "auto"):
     """Transcribe all MP3s using openai-whisper. Resumable."""
     DATASET_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -312,8 +312,8 @@ def cmd_transcribe(sample: int | None, model_name: str = WHISPER_MODEL):
                 entry = json.loads(line)
                 done.add(entry["hash"])
 
-    # Collect all MP3 files
-    all_files = sorted(CACHE_DIR.glob("**/*.mp3"))
+    # Collect all audio files (FLAC from segment step, or raw MP3 from Polly cache)
+    all_files = sorted(p for p in CACHE_DIR.glob("**/*") if p.suffix.lower() in _AUDIO_EXTS)
     if sample:
         all_files = all_files[:sample]
 
@@ -326,8 +326,8 @@ def cmd_transcribe(sample: int | None, model_name: str = WHISPER_MODEL):
         print("Nothing to do.")
         return
 
-    print(f"Loading model: {model_name}")
-    model = whisper.load_model(model_name)
+    print(f"Loading model: {model_name} | device: {device}")
+    model = whisper.load_model(model_name, device=device)
 
     errors = 0
     with open(TRANSCRIPTIONS_FILE, "a") as out:
@@ -471,7 +471,7 @@ def _print_transcription_stats():
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def cmd_filter(skip_snr: bool = False):
+def cmd_filter(check_snr: bool = False):
     """Filter transcriptions by language, duration, and quality."""
     if not TRANSCRIPTIONS_FILE.exists():
         print("No transcriptions.jsonl found. Run: transcribe first.")
@@ -483,8 +483,8 @@ def cmd_filter(skip_snr: bool = False):
             entries.append(json.loads(line))
 
     print(f"Input: {len(entries):,} entries")
-    if skip_snr:
-        print("SNR check skipped (--skip-snr)")
+    if not check_snr:
+        print("SNR check skipped (use --snr to enable)")
 
     reasons = {
         "wrong_language": 0,
@@ -498,7 +498,7 @@ def cmd_filter(skip_snr: bool = False):
     kept = []
 
     desc = "Filtering"
-    if not skip_snr:
+    if check_snr:
         print("SNR check reads audio files — may take a while...")
     for e in tqdm(entries, desc=desc, unit="file"):
         if e.get("language") != TARGET_LANGUAGE:
@@ -521,7 +521,7 @@ def cmd_filter(skip_snr: bool = False):
         if len(text.split()) < MIN_WORDS:
             reasons["too_few_words"] += 1
             continue
-        if not skip_snr:
+        if check_snr:
             snr = _estimate_snr_db(Path(e["path"]))
             if snr < MIN_SNR_DB:
                 reasons["low_snr"] += 1
@@ -670,7 +670,15 @@ def cmd_cluster(n_speakers=None, min_speakers=2, distance_threshold=None):
 
 
 def _cluster_embeddings(embeddings, n_speakers=None, min_speakers=2, distance_threshold=None):
-    """Auto-cluster speaker embeddings. Returns (n_speakers, labels array)."""
+    """Auto-cluster speaker embeddings. Returns (n_speakers, labels array).
+
+    Auto-detection uses Ward linkage + largest-gap heuristic:
+    for each candidate k, gap = Z[n-k, 2] - Z[n-k-1, 2] measures how much
+    Ward distance is gained by merging the k-th cluster pair. A large gap
+    means k clusters are naturally well-separated in embedding space.
+    This is more reliable than silhouette for Polly voices, which can have
+    uneven cluster sizes and subtle inter-voice similarity.
+    """
     if n_speakers is not None:
         clustering = AgglomerativeClustering(n_clusters=n_speakers)
         labels = clustering.fit_predict(embeddings)
@@ -686,33 +694,29 @@ def _cluster_embeddings(embeddings, n_speakers=None, min_speakers=2, distance_th
         print(f"Distance threshold {distance_threshold} → {n} cluster(s)")
         return n, labels
 
-    best_score = -1
-    best_n = 1
-    best_labels = None
-
-    max_clusters = min(20, len(embeddings) // 10)
+    Z = linkage(embeddings, method="ward")
+    n_pts = len(embeddings)
+    max_search = min(50, n_pts - 1)
     start = max(2, min_speakers)
 
-    if max_clusters < start:
-        return 1, np.zeros(len(embeddings), dtype=int)
+    if max_search < start:
+        return 1, np.zeros(n_pts, dtype=int)
 
-    for n in range(start, max_clusters + 1):
-        clustering = AgglomerativeClustering(n_clusters=n)
-        labels = clustering.fit_predict(embeddings)
-        try:
-            score = silhouette_score(embeddings, labels)
-        except Exception:
-            continue
-        if score > best_score:
-            best_score = score
-            best_n = n
-            best_labels = labels
+    gaps = [
+        (k, float(Z[n_pts - k, 2] - Z[n_pts - k - 1, 2]))
+        for k in range(start, max_search + 1)
+    ]
+    ranked = sorted(gaps, key=lambda x: -x[1])
+    best_n = ranked[0][0]
 
-    if best_labels is None:
-        return 1, np.zeros(len(embeddings), dtype=int)
+    print("Top cluster candidates (Ward gap — larger = more natural boundary):")
+    for k, gap in ranked[:10]:
+        marker = " ← recommended" if k == best_n else ""
+        print(f"  n={k:3d}  gap={gap:.4f}{marker}")
+    print("Tip: use --n-speakers to override if the result looks wrong.")
 
-    print(f"Best cluster count: {best_n} (silhouette score: {best_score:.3f})")
-    return best_n, best_labels
+    labels = fcluster(Z, best_n, criterion="maxclust") - 1  # 0-indexed
+    return best_n, labels
 
 
 def _write_speakers_single(entries):
@@ -808,16 +812,12 @@ def cmd_format(rename_speakers: list[str] | None):
 
         result = subprocess.run(
             [
-                "ffmpeg",
-                "-y",
-                "-i",
-                entry["path"],
-                "-ac",
-                "1",
-                "-ar",
-                "24000",
-                "-sample_fmt",
-                "s16",
+                "ffmpeg", "-y",
+                "-i", entry["path"],
+                "-af", "aresample=resampler=soxr:precision=28",
+                "-ac", "1",
+                "-ar", "24000",
+                "-sample_fmt", "s16",
                 str(wav_path),
             ],
             capture_output=True,
@@ -1000,9 +1000,9 @@ def main():
         help="Skip EBU R128 loudness normalization (uses stream copy, faster but no volume correction)",
     )
     p_segment.add_argument(
-        "--no-denoise",
+        "--denoise",
         action="store_true",
-        help="Skip light denoising (highpass + afftdn); only applies when normalizing",
+        help="Enable light denoising (highpass + afftdn); only applies when normalizing",
     )
 
     # transcribe
@@ -1021,13 +1021,18 @@ def main():
         default=WHISPER_MODEL,
         help=f"Whisper model name (default: {WHISPER_MODEL})",
     )
+    p_transcribe.add_argument(
+        "--device",
+        default="auto",
+        help="Device for Whisper inference: auto, cpu, cuda, cuda:0, mps, … (default: auto)",
+    )
 
     # filter
     p_filter = subparsers.add_parser("filter", help="Filter by language, duration, quality")
     p_filter.add_argument(
-        "--skip-snr",
+        "--snr",
         action="store_true",
-        help="Skip SNR background-noise check (faster reruns when audio quality is already known)",
+        help="Enable SNR background-noise check (reads all audio files — slow)",
     )
 
     # cluster
@@ -1082,12 +1087,12 @@ def main():
             silence_min_s=args.silence_min,
             rng_seed=args.seed,
             normalize=not args.no_normalize,
-            denoise=not args.no_denoise,
+            denoise=args.denoise,
         )
     elif args.command == "transcribe":
-        cmd_transcribe(sample=args.sample, model_name=args.model)
+        cmd_transcribe(sample=args.sample, model_name=args.model, device=args.device)
     elif args.command == "filter":
-        cmd_filter(skip_snr=args.skip_snr)
+        cmd_filter(check_snr=args.snr)
     elif args.command == "cluster":
         cmd_cluster(n_speakers=args.n_speakers, min_speakers=args.min_speakers, distance_threshold=args.distance_threshold)
     elif args.command == "drop":
