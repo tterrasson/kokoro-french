@@ -1,83 +1,177 @@
-# kokoro-français
+# kokoro-french
 
-Training recipe for fine-tuning [Kokoro-82M](https://github.com/hexgrad/kokoro) for French with a patched [StyleTTS2](https://github.com/yl4579/StyleTTS2).
+Fine-tuning recipe for [Kokoro-82M](https://github.com/hexgrad/kokoro) (StyleTTS 2-based) for French TTS.
 
-Forked from [semidark/kikiri-tts](https://github.com/semidark/kikiri-tts) and adapted for French.
+Forked from [semidark/kikiri-tts](https://github.com/semidark/kikiri-tts).
 
-## What This Is
+## Quick Start
 
-- A reproducible fine-tuning workflow (dataset prep -> Stage 1 -> Stage 2 -> voicepack extraction)
-- Original scripts for data preparation and checkpoint/voicepack conversion
-- A patched `StyleTTS2/` submodule with the fixes required for stable Stage 2 training
-
-## What This Is Not
-
-- Not a general-purpose Kokoro replacement repository
-- Not a bundled upstream mirror of `demo/`, `examples/`, `kokoro.js/`, or `tests/`
-- Not a redistributable training dataset
-
-## Start Here
-
-### I want to train my own French voice
-
-Start with `docs/TRAINING_GUIDE.md`.
-
-### I am debugging training failures
-
-Go to `docs/TROUBLESHOOTING.md`.
-
-### I want architecture details and compatibility notes
-
-See `docs/ARCHITECTURE.md`.
-
-## Status
-
-The end-to-end pipeline is working:
-
-`Dataset preparation -> Weight conversion -> Stage 1 -> Stage 2 -> Voicepack extraction -> KModel inference`
-
-## Quick Setup
-
-### Prerequisites
+Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get install espeak-ng libsndfile1
+# System dependencies
+# Ubuntu/Debian: sudo apt-get install espeak-ng libsndfile1
+# macOS:         brew install espeak-ng libsndfile
 
-# macOS
-brew install espeak-ng libsndfile
-```
-
-### Clone
-
-```bash
-git clone https://github.com/tterrasson/kokoro-french
-cd kokoro-french
+# Install Python dependencies
 uv sync
 ```
 
-## Repository Layout
+## Training Pipeline
 
-```text
-kokoro/              # Kokoro fork submodule (contains the `kokoro/` Python package)
-StyleTTS2/           # Patched training code (git submodule: semidark/StyleTTS2)
-scripts/             # Dataset prep, voicepack extraction, inference testing
-configs/             # Training config(s)
-docs/                # Training guide, troubleshooting, architecture notes
-training/            # Local training artifacts metadata (audio excluded)
+```
+Raw audio → Segment → Transcribe → Filter → Cluster → Format → Prepare → Convert weights → Stage 1 → Stage 2 → Export
 ```
 
-## Contributing
+### 1. Segment raw audio
 
-Contributions are welcome, especially:
+Drop your raw audio files into the `raw/` directory, then split long recordings into short segments:
 
-- Reproducible runs on public datasets
-- Training stability and quality improvements
-- French dataset contributions
+```bash
+uv run python scripts/prepare_dataset.py segment --input-dir raw/
+```
 
-## Attribution
+### 2. Transcribe segments
 
-See `NOTICE` for upstream attribution and license details.
+Generate IPA phoneme transcriptions using Whisper (resumable — safe to run overnight):
+
+```bash
+uv run python scripts/prepare_dataset.py transcribe
+```
+
+### 3. Filter
+
+Remove low-quality segments (noise, wrong language, too short/long):
+
+```bash
+uv run python scripts/prepare_dataset.py filter
+```
+
+### 4. Cluster speakers
+
+Group utterances into distinct speaker clusters using voice embeddings:
+
+```bash
+uv run python scripts/prepare_dataset.py cluster
+```
+
+Or specify a target number of speakers:
+
+```bash
+uv run python scripts/prepare_dataset.py cluster --n-speakers 5
+```
+
+### 5. Format and rename speakers
+
+Convert audio to 24 kHz WAV, generate IPA phonemes, and assign speaker names:
+
+```bash
+uv run python scripts/prepare_dataset.py format --rename-speakers d_speaker0=ff_XXXX d_speaker1=dm_YYYY
+```
+
+### 6. Prepare training data
+
+Generate train/validation splits and precompute mel spectrograms and F0 contours:
+
+```bash
+uv run python scripts/prepare_training.py prepare
+```
+
+Convert Kokoro HuggingFace weights to StyleTTS2 checkpoint format (downloads from HuggingFace, requires internet):
+
+```bash
+uv run python scripts/prepare_training.py convert-weights
+```
+
+Precompute mel spectrograms and F0 contours (optional but saves GPU time during training):
+
+```bash
+uv run python scripts/prepare_training.py precompute
+```
+
+Verify data integrity before training (check missing WAVs, unknown phonemes, etc.):
+
+```bash
+uv run python scripts/prepare_training.py verify
+```
+
+### 7. Train
+
+#### Stage 1 — Decoder + Alignment
+
+Trains the vocoder decoder and monotonic aligner. Produces a checkpoint with a working style encoder.
+
+```bash
+cd StyleTTS2
+uv run accelerate launch train_first.py --config_path ../configs/config_french_ft.yml
+```
+
+#### Stage 2 — Prosody Predictor
+
+Trains duration, pitch (F0), and energy predictors on top of the Stage 1 decoder.
+
+```bash
+uv run accelerate launch train_second.py --config_path ../configs/config_french_ft.yml
+```
+
+**Important config settings** (in `config_french_ft.yml`):
+
+```yaml
+second_stage_load_pretrained: false  # Load from first_stage.pth, not from scratch
+joint_epoch: 3                       # Start adversarial training at epoch 3
+lambda_slm: 1.0                      # Enable SLM adversarial loss
+```
+
+### 8. Export checkpoint
+
+Convert the trained checkpoint to Kokoro KModel format:
+
+```bash
+uv run python scripts/export_checkpoint.py \
+    --checkpoint StyleTTS2/logs/kokoro_french/epoch_2nd_00001.pth \
+    --output voices/kokoro_french.pth
+```
+
+### 9. Extract voicepacks (optional)
+
+Extract per-speaker voicepacks from a checkpoint.
+
+> **Note:** Always pass `--style-encoder-model` pointing to the Stage 1 checkpoint. Stage 2 can degrade the style encoder (spectral norm drift), so load the timbre encoder from Stage 1 and the prosody predictor from Stage 2.
+
+```bash
+uv run python scripts/extract_voicepack.py \
+    --model StyleTTS2/logs/kokoro_french/epoch_2nd_00001.pth \
+    --style-encoder-model StyleTTS2/logs/kokoro_french/epoch_1st_00002.pth \
+    --audio-dir dataset/audio/ff_XXXX \
+    --output voices/ff_XXXX.pt
+```
+
+Add `--device cpu` to run on CPU (slower but works while the GPU is busy training).
+
+### 10. Inference
+
+```bash
+uv run kokoro --text "Bonjour le monde" -o out.wav -l fr --voice <voice_name>
+```
+
+## Technical Details
+
+- **Sample rate:** 24 000 Hz
+- **Max phoneme length:** 510 tokens
+- **Voicepack format:** `.pt`, shape `[510, 1, 256]` (float32)
+
+## Repository Layout
+
+```
+kokoro/kokoro/       # Inference package (KModel, KPipeline)
+kokoro/              # Upstream kokoro submodule
+misaki/              # G2P phonemizer (bundled)
+StyleTTS2/           # Patched training code (submodule)
+scripts/             # Dataset prep, checkpoint export, voicepack extraction
+configs/             # Training config(s)
+training/            # Training metadata (lists, symbols, OOD texts)
+docs/                # Troubleshooting, architecture notes
+```
 
 ## License
 

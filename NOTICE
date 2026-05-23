@@ -1,7 +1,9 @@
-kokoro-deutsch
+kokoro-french
 Copyright 2026 semidark
+Copyright 2026 tterrasson
 
-This project contains code from the following open-source projects:
+This project is a fork of kokoro-deutsch (semidark/kokoro-deutsch) and contains
+code from the following open-source projects:
 
 ────────────────────────────────────────────────────────────────────────────────
 
@@ -31,7 +33,7 @@ StyleTTS2/ — Training code (git submodule)
 
 The following directories contain original work by this project's contributors:
 
-  scripts/     — Dataset preparation, voicepack extraction, inference testing
-  configs/     — Training configuration for German fine-tuning
+  scripts/     — Dataset preparation, checkpoint export, voicepack extraction, inference testing
+  configs/     — Training configuration for French and German fine-tuning
   docs/        — Training guide and documentation
   training/    — Training data lists and OOD texts (audio files excluded)
