@@ -1,12 +1,7 @@
 # coding:utf-8
 
-import os
-import os.path as osp
-
-import copy
 import math
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -203,6 +198,7 @@ class StyleEncoder(nn.Module):
         blocks = []
         blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
 
+        dim_out = None
         repeat_num = 4
         for _ in range(repeat_num):
             dim_out = min(dim_in * 2, max_conv_dim)
@@ -244,7 +240,8 @@ class Discriminator2d(nn.Module):
         blocks = []
         blocks += [spectral_norm(nn.Conv2d(1, dim_in, 3, 1, 1))]
 
-        for lid in range(repeat_num):
+        dim_out = None
+        for _ in range(repeat_num):
             dim_out = min(dim_in * 2, max_conv_dim)
             blocks += [ResBlk(dim_in, dim_out, downsample="half")]
             dim_in = dim_out
