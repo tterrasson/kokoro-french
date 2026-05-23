@@ -1,8 +1,8 @@
-from attr import attr
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class CustomSTFT(nn.Module):
     """
@@ -11,7 +11,7 @@ class CustomSTFT(nn.Module):
     - forward STFT => Real-part conv1d + Imag-part conv1d
     - inverse STFT => Real-part conv_transpose1d + Imag-part conv_transpose1d + sum
     - avoids F.unfold, so easier to export to ONNX
-    - uses replicate or constant padding for 'center=True' to approximate 'reflect' 
+    - uses replicate or constant padding for 'center=True' to approximate 'reflect'
       (reflect is not supported for dynamic shapes in ONNX)
     """
 

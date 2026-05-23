@@ -663,7 +663,7 @@ def cmd_cluster(n_speakers=None, min_speakers=2, distance_threshold=None):
     print("\nNext: listen to each sample above to verify gender,")
     print("then re-run format with --rename-speakers, e.g.:")
     rename_example = "  python prepare_dataset.py format --rename-speakers " + " ".join(
-        f"{spk}=df_name" if i == 0 else f"{spk}=dm_name"
+        f"{spk}=ff_name" if i == 0 else f"{spk}=fm_name"
         for i, spk in enumerate(sorted(speaker_counts))
     )
     print(rename_example)
