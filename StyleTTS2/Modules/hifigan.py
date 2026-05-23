@@ -1,14 +1,15 @@
-import torch
-import torch.nn.functional as F
-import torch.nn as nn
-from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
-from torch.nn.utils.parametrizations import weight_norm
-from torch.nn.utils.parametrize import remove_parametrizations
-from .utils import init_weights, get_padding
-
 import math
 import random
+
 import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import Conv1d, ConvTranspose1d
+from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils.parametrize import remove_parametrizations
+
+from .utils import get_padding, init_weights
 
 LRELU_SLOPE = 0.1
 
@@ -429,6 +430,7 @@ class Generator(torch.nn.Module):
         self.alphas = nn.ParameterList()
         self.alphas.append(nn.Parameter(torch.ones(1, upsample_initial_channel, 1)))
 
+        ch = None
         for i in range(len(self.ups)):
             ch = upsample_initial_channel // (2 ** (i + 1))
             self.alphas.append(nn.Parameter(torch.ones(1, ch, 1)))
@@ -463,7 +465,9 @@ class Generator(torch.nn.Module):
                     xs = self.resblocks[i * self.num_kernels + j](x, s)
                 else:
                     xs += self.resblocks[i * self.num_kernels + j](x, s)
+
             x = xs / self.num_kernels
+
         x = x + (1 / self.alphas[i + 1]) * (torch.sin(self.alphas[i + 1] * x) ** 2)
         x = self.conv_post(x)
         x = torch.tanh(x)

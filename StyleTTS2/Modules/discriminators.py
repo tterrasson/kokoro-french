@@ -1,8 +1,8 @@
 import torch
-import torch.nn.functional as F
 import torch.nn as nn
-from torch.nn import Conv1d, AvgPool1d, Conv2d
-from torch.nn.utils.parametrizations import weight_norm, spectral_norm
+import torch.nn.functional as F
+from torch.nn import Conv1d, Conv2d
+from torch.nn.utils.parametrizations import spectral_norm, weight_norm
 
 from .utils import get_padding
 
@@ -21,8 +21,8 @@ def stft(x, fft_size, hop_size, win_length, window):
         Tensor: Magnitude spectrogram (B, #frames, fft_size // 2 + 1).
     """
     x_stft = torch.stft(x, fft_size, hop_size, win_length, window, return_complex=True)
-    real = x_stft[..., 0]
-    imag = x_stft[..., 1]
+    # real = x_stft[..., 0]
+    # imag = x_stft[..., 1]
 
     return torch.abs(x_stft).transpose(2, 1)
 
@@ -39,7 +39,7 @@ class SpecDiscriminator(nn.Module):
         use_spectral_norm=False,
     ):
         super(SpecDiscriminator, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm if not use_spectral_norm else spectral_norm
         self.fft_size = fft_size
         self.shift_size = shift_size
         self.win_length = win_length
@@ -76,7 +76,8 @@ class SpecDiscriminator(nn.Module):
             self.window.to(y.get_device()),
         )
         y = y.unsqueeze(1)
-        for i, d in enumerate(self.discriminators):
+
+        for _, d in enumerate(self.discriminators):
             y = d(y)
             y = F.leaky_relu(y, LRELU_SLOPE)
             fmap.append(y)
@@ -110,7 +111,7 @@ class MultiResSpecDiscriminator(torch.nn.Module):
         y_d_gs = []
         fmap_rs = []
         fmap_gs = []
-        for i, d in enumerate(self.discriminators):
+        for _, d in enumerate(self.discriminators):
             y_d_r, fmap_r = d(y)
             y_d_g, fmap_g = d(y_hat)
             y_d_rs.append(y_d_r)
@@ -123,9 +124,9 @@ class MultiResSpecDiscriminator(torch.nn.Module):
 
 class DiscriminatorP(torch.nn.Module):
     def __init__(self, period, kernel_size=5, stride=3, use_spectral_norm=False):
-        super(DiscriminatorP, self).__init__()
+        super().__init__()
         self.period = period
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm if not use_spectral_norm else spectral_norm
         self.convs = nn.ModuleList(
             [
                 norm_f(
@@ -180,10 +181,11 @@ class DiscriminatorP(torch.nn.Module):
             t = t + n_pad
         x = x.view(b, c, t // self.period, self.period)
 
-        for l in self.convs:
-            x = l(x)
+        for conv in self.convs:
+            x = conv(x)
             x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
+
         x = self.conv_post(x)
         fmap.append(x)
         x = torch.flatten(x, 1, -1)
@@ -193,7 +195,7 @@ class DiscriminatorP(torch.nn.Module):
 
 class MultiPeriodDiscriminator(torch.nn.Module):
     def __init__(self):
-        super(MultiPeriodDiscriminator, self).__init__()
+        super().__init__()
         self.discriminators = nn.ModuleList(
             [
                 DiscriminatorP(2),
@@ -209,7 +211,8 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         y_d_gs = []
         fmap_rs = []
         fmap_gs = []
-        for i, d in enumerate(self.discriminators):
+
+        for _, d in enumerate(self.discriminators):
             y_d_r, fmap_r = d(y)
             y_d_g, fmap_g = d(y_hat)
             y_d_rs.append(y_d_r)
@@ -227,7 +230,7 @@ class WavLMDiscriminator(nn.Module):
         self, slm_hidden=768, slm_layers=13, initial_channel=64, use_spectral_norm=False
     ):
         super(WavLMDiscriminator, self).__init__()
-        norm_f = weight_norm if use_spectral_norm == False else spectral_norm
+        norm_f = weight_norm if not use_spectral_norm else spectral_norm
         self.pre = norm_f(
             Conv1d(slm_hidden * slm_layers, initial_channel, 1, 1, padding=0)
         )
@@ -259,10 +262,11 @@ class WavLMDiscriminator(nn.Module):
         x = self.pre(x)
 
         fmap = []
-        for l in self.convs:
-            x = l(x)
+        for conv in self.convs:
+            x = conv(x)
             x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
+
         x = self.conv_post(x)
         x = torch.flatten(x, 1, -1)
 
