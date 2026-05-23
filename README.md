@@ -20,7 +20,14 @@ uv sync
 ## Training Pipeline
 
 ```
-Raw audio → Segment → Transcribe → Filter → Cluster → Format → Prepare → Convert weights → Stage 1 → Stage 2 → Export
+  Raw audio → Segment → Transcribe
+                      → Filter → Cluster → Format
+                      → Prepare splits → Convert weights
+                      → Precompute → Verify
+                      → Stage 1 (Decoder + Alignment)
+                      → Stage 2 (Prosody Predictor)
+                      → Export checkpoint → Extract voicepack
+                      → Inference
 ```
 
 ### 1. Segment raw audio
