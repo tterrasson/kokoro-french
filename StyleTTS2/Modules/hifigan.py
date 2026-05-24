@@ -383,12 +383,12 @@ class Generator(torch.nn.Module):
 
         self.m_source = SourceModuleHnNSF(
             sampling_rate=24000,
-            upsample_scale=np.prod(upsample_rates),
+            upsample_scale=math.prod(upsample_rates),
             harmonic_num=8,
             voiced_threshod=10,
         )
 
-        self.f0_upsamp = torch.nn.Upsample(scale_factor=np.prod(upsample_rates))
+        self.f0_upsamp = torch.nn.Upsample(scale_factor=math.prod(upsample_rates))
         self.noise_convs = nn.ModuleList()
         self.ups = nn.ModuleList()
         self.noise_res = nn.ModuleList()
@@ -410,7 +410,7 @@ class Generator(torch.nn.Module):
             )
 
             if i + 1 < len(upsample_rates):  #
-                stride_f0 = np.prod(upsample_rates[i + 1 :])
+                stride_f0 = math.prod(upsample_rates[i + 1 :])
                 self.noise_convs.append(
                     Conv1d(
                         1,

@@ -27,6 +27,10 @@ def compile_model_for_training(model, config: Mapping | None, logger=None):
     mode = compile_config.get("mode", "default")
     fullgraph = bool(compile_config.get("fullgraph", False))
     dynamic = compile_config.get("dynamic", True)
+    recompile_limit = compile_config.get("recompile_limit", 32)
+
+    if hasattr(torch, "_dynamo"):
+        torch._dynamo.config.recompile_limit = recompile_limit
 
     compiled = []
     failed = []

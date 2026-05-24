@@ -10,7 +10,7 @@ load_only_params: true
 second_stage_load_pretrained: false  # false = load from first_stage.pth (recommended)
 log_interval: 10
 torch_compile:
-  enabled: true
+  enabled: false
   mode: "default"
   fullgraph: false
   dynamic: true

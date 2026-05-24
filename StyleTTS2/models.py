@@ -38,6 +38,28 @@ def _get_nested(config, path, default=None):
     return current
 
 
+def _config_int(value):
+    if hasattr(value, "item"):
+        value = value.item()
+    return int(value)
+
+
+def _config_int_list(values):
+    if hasattr(values, "tolist"):
+        values = values.tolist()
+    return [_config_int(value) for value in values]
+
+
+def _normalize_decoder_config(decoder):
+    decoder.upsample_rates = _config_int_list(decoder.upsample_rates)
+    decoder.upsample_kernel_sizes = _config_int_list(decoder.upsample_kernel_sizes)
+    decoder.upsample_initial_channel = _config_int(decoder.upsample_initial_channel)
+    if hasattr(decoder, "gen_istft_hop_size"):
+        decoder.gen_istft_hop_size = _config_int(decoder.gen_istft_hop_size)
+    if hasattr(decoder, "gen_istft_n_fft"):
+        decoder.gen_istft_n_fft = _config_int(decoder.gen_istft_n_fft)
+
+
 class LearnedDownSample(nn.Module):
     def __init__(self, layer_type, dim_in):
         super().__init__()
@@ -760,6 +782,7 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
 
 def build_model(args, text_aligner, pitch_extractor, bert):
     assert args.decoder.type in ["istftnet", "hifigan"], "Decoder type unknown"
+    _normalize_decoder_config(args.decoder)
 
     if args.decoder.type == "istftnet":
         from Modules.istftnet import Decoder
