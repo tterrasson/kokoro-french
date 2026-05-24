@@ -46,12 +46,12 @@ warnings.simplefilter("ignore")
 logger = get_logger(__name__, log_level="DEBUG")
 
 
-def linear_warmup(epoch, start_epoch, warmup_epochs, start_value=0.0, end_value=1.0):
-    if epoch < start_epoch:
+def linear_warmup_step(step, start_step, warmup_steps, start_value=0.0, end_value=1.0):
+    if step < start_step:
         return start_value
-    if warmup_epochs <= 0:
+    if warmup_steps <= 0:
         return end_value
-    progress = min(1.0, max(0.0, (epoch - start_epoch + 1) / warmup_epochs))
+    progress = min(1.0, max(0.0, (step - start_step + 1) / warmup_steps))
     return start_value + (end_value - start_value) * progress
 
 
@@ -263,24 +263,13 @@ def main(config_path, run_name):
     epoch = start_epoch
     loss_test = 0.0
     iters_test = 1
+    steps_per_epoch = max(1, len(train_dataloader))
+    tma_start_step = TMA_epoch * steps_per_epoch
+    adv_warmup_steps = adv_warmup_epochs * steps_per_epoch
     for epoch in range(start_epoch, epochs):
         running_loss = 0.0
         running_steps = 0
         avg_mel_loss = 0.0
-        adv_weight = linear_warmup(
-            epoch,
-            TMA_epoch,
-            adv_warmup_epochs,
-            lambda_gen_start,
-            1.0,
-        )
-        slm_weight = linear_warmup(
-            epoch,
-            TMA_epoch,
-            adv_warmup_epochs,
-            lambda_slm_start,
-            1.0,
-        )
         extra_disc_weights = {
             "msstft": (
                 float(getattr(loss_params, "lambda_msstft_adv", 0.10)),
@@ -301,6 +290,21 @@ def main(config_path, run_name):
             disable=not accelerator.is_main_process,
         )
         for i, batch in train_bar:
+            global_step = epoch * steps_per_epoch + i
+            adv_weight = linear_warmup_step(
+                global_step,
+                tma_start_step,
+                adv_warmup_steps,
+                lambda_gen_start,
+                1.0,
+            )
+            slm_weight = linear_warmup_step(
+                global_step,
+                tma_start_step,
+                adv_warmup_steps,
+                lambda_slm_start,
+                1.0,
+            )
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch

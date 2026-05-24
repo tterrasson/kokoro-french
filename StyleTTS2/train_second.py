@@ -51,12 +51,12 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
-def linear_warmup(epoch, start_epoch, warmup_epochs, start_value=0.0, end_value=1.0):
-    if epoch < start_epoch:
+def linear_warmup_step(step, start_step, warmup_steps, start_value=0.0, end_value=1.0):
+    if step < start_step:
         return start_value
-    if warmup_epochs <= 0:
+    if warmup_steps <= 0:
         return end_value
-    progress = min(1.0, max(0.0, (epoch - start_epoch + 1) / warmup_epochs))
+    progress = min(1.0, max(0.0, (step - start_step + 1) / warmup_steps))
     return start_value + (end_value - start_value) * progress
 
 
@@ -354,6 +354,11 @@ def main(config_path, run_name):
     [model[key].train() for key in model]
     # ─────────────────────────────────────────────────────────────────────────
 
+    steps_per_epoch = max(1, len(train_dataloader))
+    joint_start_step = joint_epoch * steps_per_epoch
+    adv_warmup_steps = adv_warmup_epochs * steps_per_epoch
+    slmadv_warmup_steps = slmadv_warmup_epochs * steps_per_epoch
+    real_audio_mix_warmup_steps = real_audio_mix_warmup_epochs * steps_per_epoch
     for epoch in range(start_epoch, epochs):
         running_loss = 0.0
         running_steps = 0
@@ -362,34 +367,6 @@ def main(config_path, run_name):
 
         _ = [model[key].train() for key in model]
 
-        adv_weight = linear_warmup(
-            epoch,
-            joint_epoch,
-            adv_warmup_epochs,
-            lambda_gen_start,
-            1.0,
-        )
-        slm_weight = linear_warmup(
-            epoch,
-            joint_epoch,
-            adv_warmup_epochs,
-            lambda_slm_start,
-            1.0,
-        )
-        slmadv_weight = linear_warmup(
-            epoch,
-            joint_epoch,
-            slmadv_warmup_epochs,
-            lambda_slm_start,
-            1.0,
-        )
-        real_audio_mix = linear_warmup(
-            epoch,
-            joint_epoch,
-            real_audio_mix_warmup_epochs,
-            0.0,
-            1.0,
-        )
         extra_disc_weights = {
             "msstft": (
                 float(getattr(loss_params, "lambda_msstft_adv", 0.10)),
@@ -407,6 +384,35 @@ def main(config_path, run_name):
             desc=f"Train {epoch + 1}/{epochs}",
         )
         for i, batch in train_bar:
+            global_step = epoch * steps_per_epoch + i
+            adv_weight = linear_warmup_step(
+                global_step,
+                joint_start_step,
+                adv_warmup_steps,
+                lambda_gen_start,
+                1.0,
+            )
+            slm_weight = linear_warmup_step(
+                global_step,
+                joint_start_step,
+                adv_warmup_steps,
+                lambda_slm_start,
+                1.0,
+            )
+            slmadv_weight = linear_warmup_step(
+                global_step,
+                joint_start_step,
+                slmadv_warmup_steps,
+                lambda_slm_start,
+                1.0,
+            )
+            real_audio_mix = linear_warmup_step(
+                global_step,
+                joint_start_step,
+                real_audio_mix_warmup_steps,
+                0.0,
+                1.0,
+            )
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             (
