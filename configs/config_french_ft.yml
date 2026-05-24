@@ -11,10 +11,12 @@ second_stage_load_pretrained: false  # false = load from first_stage.pth (recomm
 log_interval: 10
 torch_compile:
   enabled: false
-  mode: "default"
+  modules: ["bert_encoder"]  # Use ["bert_encoder"] or "safe" to opt in conservatively
+  mode: "reduce-overhead"
   fullgraph: false
   dynamic: true
   backend: "inductor"
+  recompile_limit: 8
 # ─────────────────────────────────────────────────────────────────────────────
 # Kokoro French Fine-Tuning Config
 # ─────────────────────────────────────────────────────────────────────────────
