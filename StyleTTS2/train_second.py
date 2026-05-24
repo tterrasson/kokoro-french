@@ -49,6 +49,15 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
+def linear_warmup(epoch, start_epoch, warmup_epochs, start_value=0.0, end_value=1.0):
+    if epoch < start_epoch:
+        return start_value
+    if warmup_epochs <= 0:
+        return end_value
+    progress = min(1.0, max(0.0, (epoch - start_epoch + 1) / warmup_epochs))
+    return start_value + (end_value - start_value) * progress
+
+
 @click.command()
 @click.option("-p", "--config_path", default="Configs/config.yml", type=str)
 @click.option("-n", "--run_name", default=None, type=str, help="Run name for TensorBoard (defaults to timestamp)")
@@ -94,6 +103,11 @@ def main(config_path, run_name):
     loss_params = Munch(config["loss_params"])
     diff_epoch = loss_params.diff_epoch
     joint_epoch = loss_params.joint_epoch
+    adv_warmup_epochs = int(getattr(loss_params, "adv_warmup_epochs", 3))
+    slmadv_warmup_epochs = int(getattr(loss_params, "slmadv_warmup_epochs", 3))
+    real_audio_mix_warmup_epochs = int(getattr(loss_params, "real_audio_mix_warmup_epochs", adv_warmup_epochs))
+    lambda_gen_start = float(getattr(loss_params, "lambda_gen_start", 0.05))
+    lambda_slm_start = float(getattr(loss_params, "lambda_slm_start", 0.05))
 
     optimizer_params = Munch(config["optimizer_params"])
 
@@ -164,6 +178,8 @@ def main(config_path, run_name):
                     "predictor_encoder",
                     "msd",
                     "mpd",
+                    "msstft",
+                    "subband",
                     "wd",
                     "diffusion",
                 ],
@@ -178,8 +194,13 @@ def main(config_path, run_name):
         else:
             raise ValueError("You need to specify the path to the first stage model.")
 
-    gl = GeneratorLoss(model.mpd, model.msd).to(device)
-    dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
+    extra_discriminators = {
+        key: model[key]
+        for key in ["msstft", "subband"]
+        if key in model
+    }
+    gl = GeneratorLoss(model.mpd, model.msd, extra_discriminators).to(device)
+    dl = DiscriminatorLoss(model.mpd, model.msd, extra_discriminators).to(device)
     wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
 
     gl = MyDataParallel(gl)
@@ -204,6 +225,11 @@ def main(config_path, run_name):
         "steps_per_epoch": max(1, len(train_dataloader) // grad_accum),
     }
     scheduler_params_dict = {key: scheduler_params.copy() for key in model}
+    for key in ["bert_encoder", "bert", "predictor", "diffusion"]:
+        if key in scheduler_params_dict:
+            scheduler_params_dict[key]["steps_per_epoch"] = max(
+                1, scheduler_params["steps_per_epoch"] * 2
+            )
     scheduler_params_dict["bert"]["max_lr"] = optimizer_params.bert_lr * 2
     scheduler_params_dict["decoder"]["max_lr"] = optimizer_params.ft_lr * 2
     scheduler_params_dict["style_encoder"]["max_lr"] = optimizer_params.ft_lr * 2
@@ -249,8 +275,9 @@ def main(config_path, run_name):
 
     # DP — must happen AFTER load_checkpoint so state dict keys match
     # (DataParallel adds 'module.' prefix which breaks strict=False loading)
+    discriminator_keys = {"mpd", "msd", "msstft", "subband", "wd"}
     for key in model:
-        if key != "mpd" and key != "msd" and key != "wd":
+        if key not in discriminator_keys:
             model[key] = MyDataParallel(model[key])
 
     n_down = model.text_aligner.n_down
@@ -265,7 +292,7 @@ def main(config_path, run_name):
     print("BERT", optimizer.optimizers["bert"])
     print("decoder", optimizer.optimizers["decoder"])
 
-    start_ds = False
+    start_ds = True
     running_std = []
 
     slmadv_params = Munch(config["slmadv_params"])
@@ -328,8 +355,44 @@ def main(config_path, run_name):
 
         _ = [model[key].train() for key in model]
 
-        if epoch >= joint_epoch:
-            start_ds = True
+        adv_weight = linear_warmup(
+            epoch,
+            joint_epoch,
+            adv_warmup_epochs,
+            lambda_gen_start,
+            1.0,
+        )
+        slm_weight = linear_warmup(
+            epoch,
+            joint_epoch,
+            adv_warmup_epochs,
+            lambda_slm_start,
+            1.0,
+        )
+        slmadv_weight = linear_warmup(
+            epoch,
+            joint_epoch,
+            slmadv_warmup_epochs,
+            lambda_slm_start,
+            1.0,
+        )
+        real_audio_mix = linear_warmup(
+            epoch,
+            joint_epoch,
+            real_audio_mix_warmup_epochs,
+            0.0,
+            1.0,
+        )
+        extra_disc_weights = {
+            "msstft": (
+                float(getattr(loss_params, "lambda_msstft_adv", 0.10)),
+                float(getattr(loss_params, "lambda_msstft_fm", 0.50)),
+            ),
+            "subband": (
+                float(getattr(loss_params, "lambda_subband_adv", 0.05)),
+                float(getattr(loss_params, "lambda_subband_fm", 0.25)),
+            ),
+        }
 
         for i, batch in enumerate(train_dataloader):
             waves = batch[0]
@@ -355,6 +418,8 @@ def main(config_path, run_name):
                 if start_ds:
                     optimizer.optimizers["msd"].zero_grad()
                     optimizer.optimizers["mpd"].zero_grad()
+                    for disc_key in extra_discriminators:
+                        optimizer.optimizers[disc_key].zero_grad()
                 for _k in ["bert_encoder", "bert", "predictor", "predictor_encoder", "diffusion", "style_encoder", "decoder"]:
                     if _k in optimizer.optimizers:
                         optimizer.optimizers[_k].zero_grad()
@@ -501,12 +566,7 @@ def main(config_path, run_name):
             y_rec_gt = wav.unsqueeze(1)
             y_rec_gt_pred = model.decoder(en, F0_real, N_real, s)
 
-            if epoch >= joint_epoch:
-                # ground truth from recording
-                wav = y_rec_gt  # use recording since decoder is tuned
-            else:
-                # ground truth from reconstruction
-                wav = y_rec_gt_pred  # use reconstruction since decoder is fixed
+            wav = real_audio_mix * y_rec_gt + (1.0 - real_audio_mix) * y_rec_gt_pred.detach()
 
             F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
 
@@ -516,20 +576,32 @@ def main(config_path, run_name):
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
 
             if start_ds:
-                d_loss = dl(wav.detach(), y_rec.detach()).mean() / accum_steps
+                d_loss = adv_weight * (
+                    dl(wav.detach(), y_rec.detach(), extra_disc_weights).mean()
+                    / accum_steps
+                )
                 d_loss.backward()
                 if is_update_step:
                     torch.nn.utils.clip_grad_norm_(
-                        list(model["msd"].parameters()) + list(model["mpd"].parameters()), grad_clip
+                        list(model["msd"].parameters())
+                        + list(model["mpd"].parameters())
+                        + [
+                            p
+                            for disc_key in extra_discriminators
+                            for p in model[disc_key].parameters()
+                        ],
+                        grad_clip
                     )
-                    optimizer.step("msd")
-                    optimizer.step("mpd")
+                    optimizer.step_and_scheduler("msd")
+                    optimizer.step_and_scheduler("mpd")
+                    for disc_key in extra_discriminators:
+                        optimizer.step_and_scheduler(disc_key)
             else:
                 d_loss = 0
 
             loss_mel = stft_loss(y_rec, wav)
             if start_ds:
-                loss_gen_all = gl(wav, y_rec).mean()
+                loss_gen_all = gl(wav, y_rec, extra_disc_weights).mean()
             else:
                 loss_gen_all = 0
             loss_lm = wl(wav.detach().squeeze(), y_rec.squeeze()).mean()
@@ -560,8 +632,8 @@ def main(config_path, run_name):
                 + loss_params.lambda_ce * loss_ce
                 + loss_params.lambda_norm * loss_norm_rec
                 + loss_params.lambda_dur * loss_dur
-                + loss_params.lambda_gen * loss_gen_all
-                + loss_params.lambda_slm * loss_lm
+                + loss_params.lambda_gen * adv_weight * loss_gen_all
+                + loss_params.lambda_slm * slm_weight * loss_lm
                 + loss_params.lambda_sty * loss_sty
                 + loss_params.lambda_diff * loss_diff
             )
@@ -570,27 +642,23 @@ def main(config_path, run_name):
             (g_loss / accum_steps).backward()
 
             if is_update_step:
-                gen_keys = ["bert_encoder", "bert", "predictor", "predictor_encoder"]
+                gen_keys = ["bert_encoder", "bert", "predictor", "predictor_encoder", "style_encoder", "decoder"]
                 if epoch >= diff_epoch:
                     gen_keys.append("diffusion")
-                if epoch >= joint_epoch:
-                    gen_keys += ["style_encoder", "decoder"]
                 torch.nn.utils.clip_grad_norm_(
                     [p for k in gen_keys if k in model for p in model[k].parameters()], grad_clip
                 )
-                optimizer.step("bert_encoder")
-                optimizer.step("bert")
-                optimizer.step("predictor")
-                optimizer.step("predictor_encoder")
+                optimizer.step_and_scheduler("bert_encoder")
+                optimizer.step_and_scheduler("bert")
+                optimizer.step_and_scheduler("predictor")
+                optimizer.step_and_scheduler("predictor_encoder")
+                optimizer.step_and_scheduler("style_encoder")
+                optimizer.step_and_scheduler("decoder")
 
                 if epoch >= diff_epoch:
-                    optimizer.step("diffusion")
+                    optimizer.step_and_scheduler("diffusion")
 
             if epoch >= joint_epoch:
-                if is_update_step:
-                    optimizer.step("style_encoder")
-                    optimizer.step("decoder")
-
                 # randomly pick whether to use in-distribution text
                 if np.random.rand() < 0.5:
                     use_ind = True
@@ -630,6 +698,8 @@ def main(config_path, run_name):
                     continue
 
                 d_loss_slm, loss_gen_lm, y_pred = slm_out
+                d_loss_slm = d_loss_slm * slmadv_weight if d_loss_slm != 0 else d_loss_slm
+                loss_gen_lm = loss_gen_lm * slmadv_weight
 
                 # SLM generator loss
                 for _k in ["bert_encoder", "bert", "predictor", "diffusion"]:
@@ -670,16 +740,16 @@ def main(config_path, run_name):
                     if p.grad is not None:
                         p.grad *= slmadv_params.scale
 
-                optimizer.step("bert_encoder")
-                optimizer.step("bert")
-                optimizer.step("predictor")
-                optimizer.step("diffusion")
+                optimizer.step_and_scheduler("bert_encoder")
+                optimizer.step_and_scheduler("bert")
+                optimizer.step_and_scheduler("predictor")
+                optimizer.step_and_scheduler("diffusion")
 
                 # SLM discriminator loss
                 if d_loss_slm != 0:
                     optimizer.optimizers["wd"].zero_grad()
                     d_loss_slm.backward(retain_graph=True)
-                    optimizer.step("wd")
+                    optimizer.step_and_scheduler("wd")
 
             else:
                 d_loss_slm, loss_gen_lm = 0, 0
@@ -715,6 +785,17 @@ def main(config_path, run_name):
                 writer.add_scalar("train/diff_loss", loss_diff, iters)
                 writer.add_scalar("train/d_loss_slm", d_loss_slm, iters)
                 writer.add_scalar("train/gen_loss_slm", loss_gen_lm, iters)
+                writer.add_scalar("train/adv_weight", adv_weight, iters)
+                writer.add_scalar("train/slm_weight", slm_weight, iters)
+                writer.add_scalar("train/slmadv_weight", slmadv_weight, iters)
+                writer.add_scalar("train/real_audio_mix", real_audio_mix, iters)
+                for lr_key in ["decoder", "msd", "mpd", "wd"]:
+                    if lr_key in optimizer.optimizers:
+                        writer.add_scalar(
+                            f"lr/{lr_key}",
+                            optimizer.optimizers[lr_key].param_groups[0]["lr"],
+                            iters,
+                        )
 
                 running_loss = 0
 

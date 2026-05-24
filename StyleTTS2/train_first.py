@@ -44,6 +44,15 @@ warnings.simplefilter("ignore")
 logger = get_logger(__name__, log_level="DEBUG")
 
 
+def linear_warmup(epoch, start_epoch, warmup_epochs, start_value=0.0, end_value=1.0):
+    if epoch < start_epoch:
+        return start_value
+    if warmup_epochs <= 0:
+        return end_value
+    progress = min(1.0, max(0.0, (epoch - start_epoch + 1) / warmup_epochs))
+    return start_value + (end_value - start_value) * progress
+
+
 @click.command()
 @click.option("-p", "--config_path", default="Configs/config.yml", type=str)
 @click.option("-n", "--run_name", default=None, type=str, help="Run name for TensorBoard (defaults to timestamp)")
@@ -155,6 +164,9 @@ def main(config_path, run_name):
 
     loss_params = Munch(config["loss_params"])
     TMA_epoch = loss_params.TMA_epoch
+    adv_warmup_epochs = int(getattr(loss_params, "adv_warmup_epochs", 3))
+    lambda_gen_start = float(getattr(loss_params, "lambda_gen_start", 0.05))
+    lambda_slm_start = float(getattr(loss_params, "lambda_slm_start", 0.05))
 
     for k in model:
         model[k] = accelerator.prepare(model[k])
@@ -174,6 +186,7 @@ def main(config_path, run_name):
 
     for k, v in optimizer.optimizers.items():
         optimizer.optimizers[k] = accelerator.prepare(optimizer.optimizers[k])
+        optimizer.schedulers[k] = accelerator.prepare(optimizer.schedulers[k])
 
     with accelerator.main_process_first():
         if config.get("pretrained_model", "") != "":
@@ -195,8 +208,13 @@ def main(config_path, run_name):
 
     # wrapped losses for compatibility with mixed precision
     stft_loss = MultiResolutionSTFTLoss().to(device)
-    gl = GeneratorLoss(model.mpd, model.msd).to(device)
-    dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
+    extra_discriminators = {
+        key: model[key]
+        for key in ["msstft", "subband"]
+        if key in model
+    }
+    gl = GeneratorLoss(model.mpd, model.msd, extra_discriminators).to(device)
+    dl = DiscriminatorLoss(model.mpd, model.msd, extra_discriminators).to(device)
     wl = WavLMLoss(model_params.slm.model, model.wd, sr, model_params.slm.sr).to(device)
 
     # ── Kokoro-faithful TensorBoard inference setup ───────────────────────────
@@ -242,6 +260,30 @@ def main(config_path, run_name):
     for epoch in range(start_epoch, epochs):
         running_loss = 0
         start_time = time.time()
+        adv_weight = linear_warmup(
+            epoch,
+            TMA_epoch,
+            adv_warmup_epochs,
+            lambda_gen_start,
+            1.0,
+        )
+        slm_weight = linear_warmup(
+            epoch,
+            TMA_epoch,
+            adv_warmup_epochs,
+            lambda_slm_start,
+            1.0,
+        )
+        extra_disc_weights = {
+            "msstft": (
+                float(getattr(loss_params, "lambda_msstft_adv", 0.10)),
+                float(getattr(loss_params, "lambda_msstft_fm", 0.50)),
+            ),
+            "subband": (
+                float(getattr(loss_params, "lambda_subband_adv", 0.05)),
+                float(getattr(loss_params, "lambda_subband_fm", 0.25)),
+            ),
+        }
 
         _ = [model[key].train() for key in model]
 
@@ -260,6 +302,8 @@ def main(config_path, run_name):
             if i % grad_accum == 0:
                 optimizer.optimizers["msd"].zero_grad()
                 optimizer.optimizers["mpd"].zero_grad()
+                for disc_key in extra_discriminators:
+                    optimizer.optimizers[disc_key].zero_grad()
                 for _k in ["text_encoder", "style_encoder", "decoder", "text_aligner", "pitch_extractor"]:
                     optimizer.optimizers[_k].zero_grad()
 
@@ -363,14 +407,30 @@ def main(config_path, run_name):
 
             # discriminator loss — accumulate over grad_accum steps, step only at boundary
             if epoch >= TMA_epoch:
-                d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean() / accum_steps
+                d_loss = adv_weight * (
+                    dl(
+                        wav.detach().unsqueeze(1).float(),
+                        y_rec.detach(),
+                        extra_disc_weights,
+                    ).mean()
+                    / accum_steps
+                )
                 accelerator.backward(d_loss)
                 if is_update_step:
                     accelerator.clip_grad_norm_(
-                        list(model["msd"].parameters()) + list(model["mpd"].parameters()), grad_clip
+                        list(model["msd"].parameters())
+                        + list(model["mpd"].parameters())
+                        + [
+                            p
+                            for disc_key in extra_discriminators
+                            for p in model[disc_key].parameters()
+                        ],
+                        grad_clip
                     )
-                    optimizer.step("msd")
-                    optimizer.step("mpd")
+                    optimizer.step_and_scheduler("msd")
+                    optimizer.step_and_scheduler("mpd")
+                    for disc_key in extra_discriminators:
+                        optimizer.step_and_scheduler(disc_key)
             else:
                 d_loss = 0
 
@@ -388,15 +448,19 @@ def main(config_path, run_name):
 
                 loss_mono = F.l1_loss(s2s_attn, s2s_attn_mono) * 10
 
-                loss_gen_all = gl(wav.detach().unsqueeze(1).float(), y_rec).mean()
+                loss_gen_all = gl(
+                    wav.detach().unsqueeze(1).float(),
+                    y_rec,
+                    extra_disc_weights,
+                ).mean()
                 loss_slm = wl(wav.detach(), y_rec).mean()
 
                 g_loss = (
                     loss_params.lambda_mel * loss_mel
                     + loss_params.lambda_mono * loss_mono
                     + loss_params.lambda_s2s * loss_s2s
-                    + loss_params.lambda_gen * loss_gen_all
-                    + loss_params.lambda_slm * loss_slm
+                    + loss_params.lambda_gen * adv_weight * loss_gen_all
+                    + loss_params.lambda_slm * slm_weight * loss_slm
                 )
 
             else:
@@ -417,13 +481,13 @@ def main(config_path, run_name):
                 accelerator.clip_grad_norm_(
                     [p for k in gen_keys for p in model[k].parameters()], grad_clip
                 )
-                optimizer.step("text_encoder")
-                optimizer.step("style_encoder")
-                optimizer.step("decoder")
+                optimizer.step_and_scheduler("text_encoder")
+                optimizer.step_and_scheduler("style_encoder")
+                optimizer.step_and_scheduler("decoder")
 
                 if epoch >= TMA_epoch:
-                    optimizer.step("text_aligner")
-                    optimizer.step("pitch_extractor")
+                    optimizer.step_and_scheduler("text_aligner")
+                    optimizer.step_and_scheduler("pitch_extractor")
 
             iters = iters + 1
 
@@ -452,6 +516,15 @@ def main(config_path, run_name):
                 writer.add_scalar("train/mono_loss", loss_mono, iters)
                 writer.add_scalar("train/s2s_loss", loss_s2s, iters)
                 writer.add_scalar("train/slm_loss", loss_slm, iters)
+                writer.add_scalar("train/adv_weight", adv_weight, iters)
+                writer.add_scalar("train/slm_weight", slm_weight, iters)
+                for lr_key in ["decoder", "msd", "mpd"]:
+                    if lr_key in optimizer.optimizers:
+                        writer.add_scalar(
+                            f"lr/{lr_key}",
+                            optimizer.optimizers[lr_key].param_groups[0]["lr"],
+                            iters,
+                        )
 
                 running_loss = 0
 

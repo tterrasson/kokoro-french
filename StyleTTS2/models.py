@@ -17,11 +17,25 @@ from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.discriminators import (
     MultiPeriodDiscriminator,
     MultiResSpecDiscriminator,
+    MultiScaleSTFTDiscriminator,
+    MultiSubBandSpecDiscriminator,
     WavLMDiscriminator,
 )
 
 from munch import Munch
 import yaml
+
+
+def _get_nested(config, path, default=None):
+    current = config
+    for key in path:
+        if current is None:
+            return default
+        if isinstance(current, dict):
+            current = current.get(key, default)
+        else:
+            current = getattr(current, key, default)
+    return current
 
 
 class LearnedDownSample(nn.Module):
@@ -833,6 +847,13 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     diffusion.diffusion.net = transformer
     diffusion.unet = transformer
 
+    discriminators = _get_nested(args, ["discriminators"], Munch())
+    mpd_params = _get_nested(discriminators, ["mpd"], Munch())
+    msd_params = _get_nested(discriminators, ["msd"], Munch())
+    msstft_params = _get_nested(discriminators, ["msstft"], Munch())
+    subband_params = _get_nested(discriminators, ["subband"], Munch())
+    wd_params = _get_nested(discriminators, ["wd"], Munch())
+
     nets = Munch(
         bert=bert,
         bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
@@ -844,13 +865,52 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         diffusion=diffusion,
         text_aligner=text_aligner,
         pitch_extractor=pitch_extractor,
-        mpd=MultiPeriodDiscriminator(),
-        msd=MultiResSpecDiscriminator(),
+        mpd=MultiPeriodDiscriminator(
+            periods=_get_nested(mpd_params, ["periods"], [2, 3, 5, 7, 11, 17])
+        ),
+        msd=MultiResSpecDiscriminator(
+            fft_sizes=_get_nested(msd_params, ["fft_sizes"], [1024, 2048, 512]),
+            hop_sizes=_get_nested(msd_params, ["hop_sizes"], [120, 240, 50]),
+            win_lengths=_get_nested(msd_params, ["win_lengths"], [600, 1200, 240]),
+            log_mag=_get_nested(msd_params, ["log_mag"], True),
+        ),
         # slm discriminator head
         wd=WavLMDiscriminator(
-            args.slm.hidden, args.slm.nlayers, args.slm.initial_channel
+            args.slm.hidden,
+            args.slm.nlayers,
+            args.slm.initial_channel,
+            return_fmaps=_get_nested(wd_params, ["return_fmaps"], False),
+            dropout_p=_get_nested(wd_params, ["dropout_p"], 0.05),
+            use_group_norm=_get_nested(wd_params, ["use_group_norm"], False),
         ),
     )
+
+    if _get_nested(msstft_params, ["enabled"], True):
+        nets.msstft = MultiScaleSTFTDiscriminator(
+            resolutions=_get_nested(
+                msstft_params,
+                ["resolutions"],
+                [[1024, 256, 1024], [2048, 512, 2048], [512, 128, 512]],
+            ),
+            channels=_get_nested(msstft_params, ["channels"], 32),
+            log_mag=_get_nested(msstft_params, ["log_mag"], True),
+            use_spectral_norm=_get_nested(msstft_params, ["use_spectral_norm"], False),
+        )
+
+    if _get_nested(subband_params, ["enabled"], True):
+        nets.subband = MultiSubBandSpecDiscriminator(
+            fft_size=_get_nested(subband_params, ["fft_size"], 1024),
+            hop_size=_get_nested(subband_params, ["hop_size"], 256),
+            win_length=_get_nested(subband_params, ["win_length"], 1024),
+            bands=_get_nested(
+                subband_params,
+                ["bands"],
+                [[0, 64], [64, 192], [192, 384], [384, None]],
+            ),
+            channels=_get_nested(subband_params, ["channels"], 16),
+            log_mag=_get_nested(subband_params, ["log_mag"], True),
+            use_spectral_norm=_get_nested(subband_params, ["use_spectral_norm"], False),
+        )
 
     return nets
 

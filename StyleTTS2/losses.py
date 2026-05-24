@@ -150,12 +150,14 @@ def generator_TPRLS_loss(disc_real_outputs, disc_generated_outputs):
 
 class GeneratorLoss(torch.nn.Module):
 
-    def __init__(self, mpd, msd):
+    def __init__(self, mpd, msd, extra_discriminators=None):
         super(GeneratorLoss, self).__init__()
         self.mpd = mpd
         self.msd = msd
+        self.extra_discriminators = torch.nn.ModuleDict(extra_discriminators or {})
 
-    def forward(self, y, y_hat):
+    def forward(self, y, y_hat, extra_weights=None):
+        extra_weights = extra_weights or {}
         y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = self.mpd(y, y_hat)
         y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = self.msd(y, y_hat)
         loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
@@ -166,17 +168,32 @@ class GeneratorLoss(torch.nn.Module):
         loss_rel = generator_TPRLS_loss(y_df_hat_r, y_df_hat_g) + generator_TPRLS_loss(y_ds_hat_r, y_ds_hat_g)
 
         loss_gen_all = loss_gen_s + loss_gen_f + loss_fm_s + loss_fm_f + loss_rel
+        for name, discriminator in self.extra_discriminators.items():
+            adv_weight, fm_weight = extra_weights.get(name, (1.0, 1.0))
+            if adv_weight == 0 and fm_weight == 0:
+                continue
+            y_d_r, y_d_g, fmap_r, fmap_g = discriminator(y, y_hat)
+            loss_gen_extra, _ = generator_loss(y_d_g)
+            loss_fm_extra = feature_loss(fmap_r, fmap_g)
+            loss_rel_extra = generator_TPRLS_loss(y_d_r, y_d_g)
+            loss_gen_all = (
+                loss_gen_all
+                + adv_weight * (loss_gen_extra + loss_rel_extra)
+                + fm_weight * loss_fm_extra
+            )
 
         return loss_gen_all.mean()
 
 class DiscriminatorLoss(torch.nn.Module):
 
-    def __init__(self, mpd, msd):
+    def __init__(self, mpd, msd, extra_discriminators=None):
         super(DiscriminatorLoss, self).__init__()
         self.mpd = mpd
         self.msd = msd
+        self.extra_discriminators = torch.nn.ModuleDict(extra_discriminators or {})
 
-    def forward(self, y, y_hat):
+    def forward(self, y, y_hat, extra_weights=None):
+        extra_weights = extra_weights or {}
         # MPD
         y_df_hat_r, y_df_hat_g, _, _ = self.mpd(y, y_hat)
         loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(y_df_hat_r, y_df_hat_g)
@@ -188,6 +205,14 @@ class DiscriminatorLoss(torch.nn.Module):
 
 
         d_loss = loss_disc_s + loss_disc_f + loss_rel
+        for name, discriminator in self.extra_discriminators.items():
+            adv_weight, _ = extra_weights.get(name, (1.0, 1.0))
+            if adv_weight == 0:
+                continue
+            y_d_r, y_d_g, _, _ = discriminator(y, y_hat)
+            loss_disc_extra, _, _ = discriminator_loss(y_d_r, y_d_g)
+            loss_rel_extra = discriminator_TPRLS_loss(y_d_r, y_d_g)
+            d_loss = d_loss + adv_weight * (loss_disc_extra + loss_rel_extra)
 
         return d_loss.mean()
 
@@ -199,6 +224,12 @@ class WavLMLoss(torch.nn.Module):
         self.wavlm = AutoModel.from_pretrained(model)
         self.wd = wd
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
+
+    def _wd_score(self, embeddings):
+        score = self.wd(embeddings)
+        if isinstance(score, tuple):
+            score = score[0]
+        return score
 
     def forward(self, wav, y_rec):
         with torch.no_grad():
@@ -217,7 +248,7 @@ class WavLMLoss(torch.nn.Module):
         y_rec_16 = self.resample(y_rec)
         y_rec_embeddings = self.wavlm(input_values=y_rec_16, output_hidden_states=True).hidden_states
         y_rec_embeddings = torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-        y_df_hat_g = self.wd(y_rec_embeddings)
+        y_df_hat_g = self._wd_score(y_rec_embeddings)
         loss_gen = torch.mean((1-y_df_hat_g)**2)
 
         return loss_gen
@@ -232,8 +263,8 @@ class WavLMLoss(torch.nn.Module):
             y_embeddings = torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
             y_rec_embeddings = torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
 
-        y_d_rs = self.wd(y_embeddings)
-        y_d_gs = self.wd(y_rec_embeddings)
+        y_d_rs = self._wd_score(y_embeddings)
+        y_d_gs = self._wd_score(y_rec_embeddings)
 
         y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
 
@@ -250,6 +281,6 @@ class WavLMLoss(torch.nn.Module):
             wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
             y_embeddings = torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
 
-        y_d_rs = self.wd(y_embeddings)
+        y_d_rs = self._wd_score(y_embeddings)
 
         return y_d_rs

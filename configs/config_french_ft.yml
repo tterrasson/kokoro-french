@@ -1,8 +1,8 @@
 batch_size: 2
-grad_accum: 8
-epochs: 10
-epochs_1st: 10
-epochs_2nd: 10
+grad_accum: 4
+epochs: 15
+epochs_1st: 15
+epochs_2nd: 15
 save_freq: 1
 pretrained_model: "../training/kokoro_base.pth"
 first_stage_path: "first_stage.pth"
@@ -95,9 +95,43 @@ model_params:
     nlayers: 13
     initial_channel: 64
 
+  discriminators:
+    mpd:
+      periods: [2, 3, 5, 7, 11, 17]
+    msd:
+      log_mag: true
+      fft_sizes: [1024, 2048, 512]
+      hop_sizes: [120, 240, 50]
+      win_lengths: [600, 1200, 240]
+    msstft:
+      enabled: true
+      log_mag: true
+      channels: 32
+      resolutions:
+        - [1024, 256, 1024]
+        - [2048, 512, 2048]
+        - [512, 128, 512]
+    subband:
+      enabled: true
+      log_mag: true
+      fft_size: 1024
+      hop_size: 256
+      win_length: 1024
+      channels: 16
+      bands:
+        - [0, 64]
+        - [64, 192]
+        - [192, 384]
+        - [384, null]
+    wd:
+      dropout_p: 0.05
+      return_fmaps: false
+      use_group_norm: false
+
 # ── Loss Weights ─────────────────────────────────────────────────────────────
 loss_params:
   lambda_gen: 1.0
+  lambda_gen_start: 0.05
   lambda_mel: 5.0                   # mel reconstruction loss
   lambda_dur: 1.0                   # duration prediction loss
   lambda_ce: 20.0                   # duration cross-entropy loss
@@ -106,11 +140,19 @@ loss_params:
   lambda_s2s: 1.0                   # sequence-to-sequence loss
   lambda_mono: 1.0                  # monotonic alignment loss
   lambda_slm: 1.0                   # SLM adversarial (0 = disabled for stage 1)
+  lambda_slm_start: 0.05
+  lambda_msstft_adv: 0.10
+  lambda_msstft_fm: 0.50
+  lambda_subband_adv: 0.05
+  lambda_subband_fm: 0.25
   lambda_diff: 0.0                  # diffusion loss (0 = disabled, no diffusion)
   lambda_sty: 0.0                   # style reconstruction (0 = disabled)
   TMA_epoch: 0                      # start alignment from epoch 0 (fine-tuning, not training from scratch)
   diff_epoch: 999                   # effectively disable diffusion training
-  joint_epoch: 3                    # start SLM joint training
+  joint_epoch: 0                    # start joint training with warmup
+  adv_warmup_epochs: 3
+  slmadv_warmup_epochs: 3
+  real_audio_mix_warmup_epochs: 3
 
 # ── Optimizer ────────────────────────────────────────────────────────────────
 optimizer_params:

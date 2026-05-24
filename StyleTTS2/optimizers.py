@@ -33,6 +33,13 @@ class MultiOptimizer:
         else:
             self.optimizers[key].step()
 
+    def step_and_scheduler(self, key=None, scaler=None):
+        keys = [key] if key is not None else self.keys
+        for step_key in keys:
+            self._step(step_key, scaler)
+            if step_key in self.schedulers:
+                self.schedulers[step_key].step()
+
     def zero_grad(self, key=None):
         if key is not None:
             self.optimizers[key].zero_grad()

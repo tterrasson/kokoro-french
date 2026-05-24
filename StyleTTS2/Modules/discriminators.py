@@ -9,7 +9,7 @@ from .utils import get_padding
 LRELU_SLOPE = 0.1
 
 
-def stft(x, fft_size, hop_size, win_length, window):
+def stft(x, fft_size, hop_size, win_length, window, log_mag=False):
     """Perform STFT and convert to magnitude spectrogram.
     Args:
         x (Tensor): Input signal tensor (B, T).
@@ -21,10 +21,11 @@ def stft(x, fft_size, hop_size, win_length, window):
         Tensor: Magnitude spectrogram (B, #frames, fft_size // 2 + 1).
     """
     x_stft = torch.stft(x, fft_size, hop_size, win_length, window, return_complex=True)
-    # real = x_stft[..., 0]
-    # imag = x_stft[..., 1]
+    mag = torch.abs(x_stft)
+    if log_mag:
+        mag = torch.log1p(mag)
 
-    return torch.abs(x_stft).transpose(2, 1)
+    return mag.transpose(2, 1)
 
 
 class SpecDiscriminator(nn.Module):
@@ -37,13 +38,19 @@ class SpecDiscriminator(nn.Module):
         win_length=600,
         window="hann_window",
         use_spectral_norm=False,
+        log_mag=False,
     ):
         super(SpecDiscriminator, self).__init__()
         norm_f = weight_norm if not use_spectral_norm else spectral_norm
         self.fft_size = fft_size
         self.shift_size = shift_size
         self.win_length = win_length
-        self.window = getattr(torch, window)(win_length)
+        self.log_mag = log_mag
+        self.register_buffer(
+            "window",
+            getattr(torch, window)(win_length),
+            persistent=False,
+        )
         self.discriminators = nn.ModuleList(
             [
                 norm_f(nn.Conv2d(1, 32, kernel_size=(3, 9), padding=(1, 4))),
@@ -73,7 +80,8 @@ class SpecDiscriminator(nn.Module):
             self.fft_size,
             self.shift_size,
             self.win_length,
-            self.window.to(y.get_device()),
+            self.window,
+            log_mag=self.log_mag,
         )
         y = y.unsqueeze(1)
 
@@ -95,14 +103,33 @@ class MultiResSpecDiscriminator(torch.nn.Module):
         hop_sizes=[120, 240, 50],
         win_lengths=[600, 1200, 240],
         window="hann_window",
+        log_mag=False,
     ):
 
         super(MultiResSpecDiscriminator, self).__init__()
         self.discriminators = nn.ModuleList(
             [
-                SpecDiscriminator(fft_sizes[0], hop_sizes[0], win_lengths[0], window),
-                SpecDiscriminator(fft_sizes[1], hop_sizes[1], win_lengths[1], window),
-                SpecDiscriminator(fft_sizes[2], hop_sizes[2], win_lengths[2], window),
+                SpecDiscriminator(
+                    fft_size=fft_sizes[0],
+                    shift_size=hop_sizes[0],
+                    win_length=win_lengths[0],
+                    window=window,
+                    log_mag=log_mag,
+                ),
+                SpecDiscriminator(
+                    fft_size=fft_sizes[1],
+                    shift_size=hop_sizes[1],
+                    win_length=win_lengths[1],
+                    window=window,
+                    log_mag=log_mag,
+                ),
+                SpecDiscriminator(
+                    fft_size=fft_sizes[2],
+                    shift_size=hop_sizes[2],
+                    win_length=win_lengths[2],
+                    window=window,
+                    log_mag=log_mag,
+                ),
             ]
         )
 
@@ -194,16 +221,11 @@ class DiscriminatorP(torch.nn.Module):
 
 
 class MultiPeriodDiscriminator(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, periods=(2, 3, 5, 7, 11, 17)):
         super().__init__()
+        self.periods = tuple(periods)
         self.discriminators = nn.ModuleList(
-            [
-                DiscriminatorP(2),
-                DiscriminatorP(3),
-                DiscriminatorP(5),
-                DiscriminatorP(7),
-                DiscriminatorP(11),
-            ]
+            [DiscriminatorP(period) for period in self.periods]
         )
 
     def forward(self, y, y_hat):
@@ -223,17 +245,213 @@ class MultiPeriodDiscriminator(torch.nn.Module):
         return y_d_rs, y_d_gs, fmap_rs, fmap_gs
 
 
+class STFTSubDiscriminator(nn.Module):
+    def __init__(
+        self,
+        fft_size=1024,
+        hop_size=256,
+        win_length=1024,
+        channels=32,
+        log_mag=True,
+        use_spectral_norm=False,
+    ):
+        super().__init__()
+        norm_f = weight_norm if not use_spectral_norm else spectral_norm
+        self.fft_size = fft_size
+        self.hop_size = hop_size
+        self.win_length = win_length
+        self.log_mag = log_mag
+        self.register_buffer("window", torch.hann_window(win_length), persistent=False)
+        self.convs = nn.ModuleList(
+            [
+                norm_f(nn.Conv2d(1, channels, kernel_size=3, padding=1)),
+                norm_f(
+                    nn.Conv2d(
+                        channels, channels * 2, kernel_size=3, stride=(1, 2), padding=1
+                    )
+                ),
+                norm_f(
+                    nn.Conv2d(
+                        channels * 2,
+                        channels * 4,
+                        kernel_size=3,
+                        stride=(2, 2),
+                        padding=1,
+                    )
+                ),
+                norm_f(nn.Conv2d(channels * 4, channels * 4, kernel_size=3, padding=1)),
+            ]
+        )
+        self.post = norm_f(nn.Conv2d(channels * 4, 1, kernel_size=3, padding=1))
+
+    def forward(self, x):
+        fmap = []
+        x = x.squeeze(1)
+        x = stft(
+            x,
+            self.fft_size,
+            self.hop_size,
+            self.win_length,
+            self.window,
+            log_mag=self.log_mag,
+        )
+        x = x.unsqueeze(1)
+
+        for conv in self.convs:
+            x = conv(x)
+            x = F.leaky_relu(x, LRELU_SLOPE)
+            fmap.append(x)
+
+        x = self.post(x)
+        fmap.append(x)
+        return torch.flatten(x, 1, -1), fmap
+
+
+class MultiScaleSTFTDiscriminator(nn.Module):
+    def __init__(
+        self,
+        resolutions=((1024, 256, 1024), (2048, 512, 2048), (512, 128, 512)),
+        channels=32,
+        log_mag=True,
+        use_spectral_norm=False,
+    ):
+        super().__init__()
+        self.discriminators = nn.ModuleList(
+            [
+                STFTSubDiscriminator(
+                    fft_size=fft_size,
+                    hop_size=hop_size,
+                    win_length=win_length,
+                    channels=channels,
+                    log_mag=log_mag,
+                    use_spectral_norm=use_spectral_norm,
+                )
+                for fft_size, hop_size, win_length in resolutions
+            ]
+        )
+
+    def forward(self, y, y_hat):
+        y_d_rs, y_d_gs, fmap_rs, fmap_gs = [], [], [], []
+        for d in self.discriminators:
+            y_d_r, fmap_r = d(y)
+            y_d_g, fmap_g = d(y_hat)
+            y_d_rs.append(y_d_r)
+            y_d_gs.append(y_d_g)
+            fmap_rs.append(fmap_r)
+            fmap_gs.append(fmap_g)
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
+class SubBandSpecDiscriminator(nn.Module):
+    def __init__(
+        self,
+        fft_size=1024,
+        hop_size=256,
+        win_length=1024,
+        bands=((0, 64), (64, 192), (192, 384), (384, None)),
+        channels=16,
+        log_mag=True,
+        use_spectral_norm=False,
+    ):
+        super().__init__()
+        norm_f = weight_norm if not use_spectral_norm else spectral_norm
+        self.fft_size = fft_size
+        self.hop_size = hop_size
+        self.win_length = win_length
+        self.bands = tuple((start, end) for start, end in bands)
+        self.log_mag = log_mag
+        self.register_buffer("window", torch.hann_window(win_length), persistent=False)
+        self.band_discriminators = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        norm_f(nn.Conv2d(1, channels, kernel_size=3, padding=1)),
+                        norm_f(
+                            nn.Conv2d(
+                                channels,
+                                channels * 2,
+                                kernel_size=3,
+                                stride=(1, 2),
+                                padding=1,
+                            )
+                        ),
+                        norm_f(
+                            nn.Conv2d(
+                                channels * 2,
+                                channels * 4,
+                                kernel_size=3,
+                                stride=(2, 2),
+                                padding=1,
+                            )
+                        ),
+                        norm_f(nn.Conv2d(channels * 4, 1, kernel_size=3, padding=1)),
+                    ]
+                )
+                for _ in self.bands
+            ]
+        )
+
+    def forward_single_band(self, x, layers):
+        fmap = []
+        for idx, layer in enumerate(layers):
+            x = layer(x)
+            if idx < len(layers) - 1:
+                x = F.leaky_relu(x, LRELU_SLOPE)
+            fmap.append(x)
+        return torch.flatten(x, 1, -1), fmap
+
+    def forward(self, x):
+        x = x.squeeze(1)
+        spec = stft(
+            x,
+            self.fft_size,
+            self.hop_size,
+            self.win_length,
+            self.window,
+            log_mag=self.log_mag,
+        ).unsqueeze(1)
+
+        outs, fmaps = [], []
+        for (start, end), layers in zip(self.bands, self.band_discriminators):
+            end = spec.shape[-1] if end is None else end
+            out, fmap = self.forward_single_band(spec[..., start:end], layers)
+            outs.append(out)
+            fmaps.append(fmap)
+        return outs, fmaps
+
+
+class MultiSubBandSpecDiscriminator(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.discriminator = SubBandSpecDiscriminator(**kwargs)
+
+    def forward(self, y, y_hat):
+        y_d_rs, fmap_rs = self.discriminator(y)
+        y_d_gs, fmap_gs = self.discriminator(y_hat)
+        return y_d_rs, y_d_gs, fmap_rs, fmap_gs
+
+
 class WavLMDiscriminator(nn.Module):
     """docstring for Discriminator."""
 
     def __init__(
-        self, slm_hidden=768, slm_layers=13, initial_channel=64, use_spectral_norm=False
+        self,
+        slm_hidden=768,
+        slm_layers=13,
+        initial_channel=64,
+        use_spectral_norm=False,
+        return_fmaps=False,
+        dropout_p=0.05,
+        use_group_norm=False,
     ):
         super(WavLMDiscriminator, self).__init__()
         norm_f = weight_norm if not use_spectral_norm else spectral_norm
+        self.return_fmaps = return_fmaps
+        self.dropout_p = dropout_p
         self.pre = norm_f(
             Conv1d(slm_hidden * slm_layers, initial_channel, 1, 1, padding=0)
         )
+        self.pre_norm = nn.GroupNorm(1, initial_channel) if use_group_norm else nn.Identity()
 
         self.convs = nn.ModuleList(
             [
@@ -260,14 +478,20 @@ class WavLMDiscriminator(nn.Module):
 
     def forward(self, x):
         x = self.pre(x)
+        x = self.pre_norm(x)
+        x = F.leaky_relu(x, LRELU_SLOPE)
 
         fmap = []
         for conv in self.convs:
+            x = F.dropout(x, p=self.dropout_p, training=self.training)
             x = conv(x)
             x = F.leaky_relu(x, LRELU_SLOPE)
             fmap.append(x)
 
         x = self.conv_post(x)
         x = torch.flatten(x, 1, -1)
+
+        if self.return_fmaps:
+            return x, fmap
 
         return x
