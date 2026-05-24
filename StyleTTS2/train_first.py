@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import yaml
 from accelerate import Accelerator, DistributedDataParallelKwargs
 from accelerate.logging import get_logger
+from compile_utils import compile_model_for_training
 from kokoro_symbols import TextCleaner
 from kokoro_tb_utils import extract_voicepack, prepare_test_tokens, run_kokoro_inference
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
@@ -20,6 +21,7 @@ from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
 from munch import Munch
 from optimizers import build_optimizer
+from progress_utils import make_progress_bar, metric_postfix, metric_value
 from torch.utils.tensorboard.writer import SummaryWriter
 from utils import (
     get_data_path_list,
@@ -159,6 +161,7 @@ def main(config_path, run_name):
     model_params = recursive_munch(config["model_params"])
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
+    model = compile_model_for_training(model, config, logger)
 
     best_loss = float("inf")  # best test loss
 
@@ -258,8 +261,9 @@ def main(config_path, run_name):
     loss_test = 0.0
     iters_test = 1
     for epoch in range(start_epoch, epochs):
-        running_loss = 0
-        start_time = time.time()
+        running_loss = 0.0
+        running_steps = 0
+        avg_mel_loss = 0.0
         adv_weight = linear_warmup(
             epoch,
             TMA_epoch,
@@ -287,7 +291,13 @@ def main(config_path, run_name):
 
         _ = [model[key].train() for key in model]
 
-        for i, batch in enumerate(train_dataloader):
+        train_bar = make_progress_bar(
+            enumerate(train_dataloader),
+            total=len(train_dataloader),
+            desc=f"Train {epoch + 1}/{epochs}",
+            disable=not accelerator.is_main_process,
+        )
+        for i, batch in train_bar:
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
@@ -471,6 +481,7 @@ def main(config_path, run_name):
                 g_loss = loss_mel
 
             running_loss += accelerator.gather(loss_mel).mean().item()
+            running_steps += 1
 
             accelerator.backward(g_loss / accum_steps)
 
@@ -491,31 +502,27 @@ def main(config_path, run_name):
 
             iters = iters + 1
 
-            if (i + 1) % log_interval == 0 and accelerator.is_main_process:
-                log_print(
-                    "Epoch [%d/%d], Step [%d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f"
-                    % (
-                        epoch + 1,
-                        epochs,
-                        i + 1,
-                        len(train_list) // batch_size,
-                        running_loss / log_interval,
-                        loss_gen_all,
-                        d_loss,
-                        loss_mono,
-                        loss_s2s,
-                        loss_slm,
-                    ),
-                    logger,
+            if accelerator.is_main_process:
+                avg_mel_loss = running_loss / max(1, running_steps)
+                train_bar.set_postfix(
+                    metric_postfix(
+                        mel=avg_mel_loss,
+                        gen=loss_gen_all,
+                        disc=d_loss,
+                        mono=loss_mono,
+                        s2s=loss_s2s,
+                        slm=loss_slm,
+                    )
                 )
 
+            if (i + 1) % log_interval == 0 and accelerator.is_main_process:
                 assert writer is not None
-                writer.add_scalar("train/mel_loss", running_loss / log_interval, iters)
-                writer.add_scalar("train/gen_loss", loss_gen_all, iters)
-                writer.add_scalar("train/d_loss", d_loss, iters)
-                writer.add_scalar("train/mono_loss", loss_mono, iters)
-                writer.add_scalar("train/s2s_loss", loss_s2s, iters)
-                writer.add_scalar("train/slm_loss", loss_slm, iters)
+                writer.add_scalar("train/mel_loss", avg_mel_loss, iters)
+                writer.add_scalar("train/gen_loss", metric_value(loss_gen_all), iters)
+                writer.add_scalar("train/d_loss", metric_value(d_loss), iters)
+                writer.add_scalar("train/mono_loss", metric_value(loss_mono), iters)
+                writer.add_scalar("train/s2s_loss", metric_value(loss_s2s), iters)
+                writer.add_scalar("train/slm_loss", metric_value(loss_slm), iters)
                 writer.add_scalar("train/adv_weight", adv_weight, iters)
                 writer.add_scalar("train/slm_weight", slm_weight, iters)
                 for lr_key in ["decoder", "msd", "mpd"]:
@@ -526,9 +533,8 @@ def main(config_path, run_name):
                             iters,
                         )
 
-                running_loss = 0
-
-                print("Time elasped:", time.time() - start_time)
+                running_loss = 0.0
+                running_steps = 0
 
         loss_test = 0
 
@@ -537,7 +543,13 @@ def main(config_path, run_name):
         s2s_attn = None
         with torch.no_grad():
             iters_test = 0
-            for batch_idx, batch in enumerate(val_dataloader):
+            val_bar = make_progress_bar(
+                enumerate(val_dataloader),
+                total=len(val_dataloader),
+                desc=f"Eval {epoch + 1}/{epochs}",
+                disable=not accelerator.is_main_process,
+            )
+            for batch_idx, batch in val_bar:
                 optimizer.zero_grad()
 
                 waves = batch[0]
@@ -615,6 +627,10 @@ def main(config_path, run_name):
 
                 loss_test += accelerator.gather(loss_mel).mean().item()
                 iters_test += 1
+                if accelerator.is_main_process:
+                    val_bar.set_postfix(
+                        metric_postfix(mel=loss_test / max(1, iters_test))
+                    )
 
         if accelerator.is_main_process:
             print("Epochs:", epoch + 1)

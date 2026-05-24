@@ -9,6 +9,12 @@ first_stage_path: "first_stage.pth"
 load_only_params: true
 second_stage_load_pretrained: false  # false = load from first_stage.pth (recommended)
 log_interval: 10
+torch_compile:
+  enabled: true
+  mode: "default"
+  fullgraph: false
+  dynamic: true
+  backend: "inductor"
 # ─────────────────────────────────────────────────────────────────────────────
 # Kokoro French Fine-Tuning Config
 # ─────────────────────────────────────────────────────────────────────────────

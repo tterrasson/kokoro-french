@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import yaml
+from compile_utils import compile_model_for_training
 from kokoro_symbols import TextCleaner
 from kokoro_tb_utils import extract_voicepack, prepare_test_tokens, run_kokoro_inference
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
@@ -23,6 +24,7 @@ from Modules.slmadv import SLMAdversarialLoss
 from munch import Munch
 from optimizers import build_optimizer
 from parallel_utils import MyDataParallel
+from progress_utils import make_progress_bar, metric_postfix, metric_value
 from torch.utils.tensorboard.writer import SummaryWriter
 from utils import (
     get_data_path_list,
@@ -273,6 +275,8 @@ def main(config_path, run_name):
         # (predictor_encoder is not trained in Stage 1)
         model.predictor_encoder = copy.deepcopy(model.style_encoder)
 
+    model = compile_model_for_training(model, config, logger)
+
     # DP — must happen AFTER load_checkpoint so state dict keys match
     # (DataParallel adds 'module.' prefix which breaks strict=False loading)
     discriminator_keys = {"mpd", "msd", "msstft", "subband", "wd"}
@@ -348,8 +352,8 @@ def main(config_path, run_name):
     # ─────────────────────────────────────────────────────────────────────────
 
     for epoch in range(start_epoch, epochs):
-        running_loss = 0
-        start_time = time.time()
+        running_loss = 0.0
+        running_steps = 0
 
         _ = [model[key].eval() for key in model]
 
@@ -394,7 +398,12 @@ def main(config_path, run_name):
             ),
         }
 
-        for i, batch in enumerate(train_dataloader):
+        train_bar = make_progress_bar(
+            enumerate(train_dataloader),
+            total=len(train_dataloader),
+            desc=f"Train {epoch + 1}/{epochs}",
+        )
+        for i, batch in train_bar:
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             (
@@ -639,6 +648,7 @@ def main(config_path, run_name):
             )
 
             running_loss += loss_mel.item()
+            running_steps += 1
             (g_loss / accum_steps).backward()
 
             if is_update_step:
@@ -687,14 +697,18 @@ def main(config_path, run_name):
 
                 if slm_out is None:
                     iters = iters + 1
-                    if (i + 1) % log_interval == 0:
-                        reason = "no-update-step" if not is_update_step else "no-valid-clips"
-                        logger.info(
-                            f"Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_list) // batch_size}]"
-                            f", Loss: {running_loss / log_interval:.5f} [slmadv skipped: {reason}]"
+                    reason = "no-update-step" if not is_update_step else "no-valid-clips"
+                    train_bar.set_postfix(
+                        metric_postfix(
+                            mel=running_loss / max(1, running_steps),
+                            disc=d_loss,
+                            dur=loss_dur,
                         )
-                        running_loss = 0
-                        print("Time elasped:", time.time() - start_time)
+                        | {"slmadv": reason}
+                    )
+                    if (i + 1) % log_interval == 0:
+                        running_loss = 0.0
+                        running_steps = 0
                     continue
 
                 d_loss_slm, loss_gen_lm, y_pred = slm_out
@@ -756,35 +770,37 @@ def main(config_path, run_name):
 
             iters = iters + 1
 
-            if (i + 1) % log_interval == 0:
-                logger.info(
-                    f"Epoch [{epoch + 1}/{epochs}], Step [{i + 1}/{len(train_list) // batch_size}]"
-                    f", Loss: {running_loss / log_interval:.5f}"
-                    f", Disc Loss: {d_loss:.5f}"
-                    f", Dur Loss: {loss_dur:.5f}"
-                    f", CE Loss: {loss_ce:.5f}"
-                    f", Norm Loss: {loss_norm_rec:.5f}"
-                    f", F0 Loss: {loss_F0_rec:.5f}"
-                    f", LM Loss: {loss_lm:.5f}"
-                    f", Gen Loss: {loss_gen_all:.5f}"
-                    f", Sty Loss: {loss_sty:.5f}"
-                    f", Diff Loss: {loss_diff:.5f}"
-                    f", DiscLM Loss: {d_loss_slm:.5f}"
-                    f", GenLM Loss: {loss_gen_lm:.5f}"
+            avg_mel_loss = running_loss / max(1, running_steps)
+            train_bar.set_postfix(
+                metric_postfix(
+                    mel=avg_mel_loss,
+                    disc=d_loss,
+                    dur=loss_dur,
+                    ce=loss_ce,
+                    f0=loss_F0_rec,
+                    lm=loss_lm,
+                    gen=loss_gen_all,
+                    sty=loss_sty,
+                    diff=loss_diff,
+                    slm_d=d_loss_slm,
+                    slm_g=loss_gen_lm,
                 )
+            )
 
-                writer.add_scalar("train/mel_loss", running_loss / log_interval, iters)
-                writer.add_scalar("train/gen_loss", loss_gen_all, iters)
-                writer.add_scalar("train/d_loss", d_loss, iters)
-                writer.add_scalar("train/ce_loss", loss_ce, iters)
-                writer.add_scalar("train/dur_loss", loss_dur, iters)
-                writer.add_scalar("train/slm_loss", loss_lm, iters)
-                writer.add_scalar("train/norm_loss", loss_norm_rec, iters)
-                writer.add_scalar("train/F0_loss", loss_F0_rec, iters)
-                writer.add_scalar("train/sty_loss", loss_sty, iters)
-                writer.add_scalar("train/diff_loss", loss_diff, iters)
-                writer.add_scalar("train/d_loss_slm", d_loss_slm, iters)
-                writer.add_scalar("train/gen_loss_slm", loss_gen_lm, iters)
+            if (i + 1) % log_interval == 0:
+
+                writer.add_scalar("train/mel_loss", avg_mel_loss, iters)
+                writer.add_scalar("train/gen_loss", metric_value(loss_gen_all), iters)
+                writer.add_scalar("train/d_loss", metric_value(d_loss), iters)
+                writer.add_scalar("train/ce_loss", metric_value(loss_ce), iters)
+                writer.add_scalar("train/dur_loss", metric_value(loss_dur), iters)
+                writer.add_scalar("train/slm_loss", metric_value(loss_lm), iters)
+                writer.add_scalar("train/norm_loss", metric_value(loss_norm_rec), iters)
+                writer.add_scalar("train/F0_loss", metric_value(loss_F0_rec), iters)
+                writer.add_scalar("train/sty_loss", metric_value(loss_sty), iters)
+                writer.add_scalar("train/diff_loss", metric_value(loss_diff), iters)
+                writer.add_scalar("train/d_loss_slm", metric_value(d_loss_slm), iters)
+                writer.add_scalar("train/gen_loss_slm", metric_value(loss_gen_lm), iters)
                 writer.add_scalar("train/adv_weight", adv_weight, iters)
                 writer.add_scalar("train/slm_weight", slm_weight, iters)
                 writer.add_scalar("train/slmadv_weight", slmadv_weight, iters)
@@ -797,9 +813,8 @@ def main(config_path, run_name):
                             iters,
                         )
 
-                running_loss = 0
-
-                print("Time elasped:", time.time() - start_time)
+                running_loss = 0.0
+                running_steps = 0
 
         loss_test = 0
         loss_align = 0
@@ -808,7 +823,12 @@ def main(config_path, run_name):
 
         with torch.no_grad():
             iters_test = 0
-            for batch_idx, batch in enumerate(val_dataloader):
+            val_bar = make_progress_bar(
+                enumerate(val_dataloader),
+                total=len(val_dataloader),
+                desc=f"Eval {epoch + 1}/{epochs}",
+            )
+            for batch_idx, batch in val_bar:
                 optimizer.zero_grad()
 
                 try:
@@ -934,9 +954,18 @@ def main(config_path, run_name):
                     loss_f += (loss_F0).mean()
 
                     iters_test += 1
+                    val_bar.set_postfix(
+                        metric_postfix(
+                            mel=loss_test / max(1, iters_test),
+                            dur=loss_align / max(1, iters_test),
+                            f0=loss_f / max(1, iters_test),
+                        )
+                    )
                 except Exception as e:
-                    print(f"run into exception: {e}")
-                    traceback.print_exc()
+                    tqdm_msg = f"validation batch skipped: {e}"
+                    val_bar.write(tqdm_msg)
+                    logger.debug(tqdm_msg)
+                    logger.debug(traceback.format_exc())
                     continue
 
         print("Epochs:", epoch + 1)

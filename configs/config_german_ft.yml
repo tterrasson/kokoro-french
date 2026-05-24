@@ -7,6 +7,12 @@ pretrained_model: "../training/kokoro_base.pth"
 first_stage_path: "first_stage.pth"
 load_only_params: true
 second_stage_load_pretrained: false  # false = load from first_stage.pth (recommended)
+torch_compile:
+  enabled: false
+  mode: "default"
+  fullgraph: false
+  dynamic: true
+  backend: "inductor"
 # ─────────────────────────────────────────────────────────────────────────────
 # Kokoro German Fine-Tuning Config
 # ─────────────────────────────────────────────────────────────────────────────
