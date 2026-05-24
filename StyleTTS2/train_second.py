@@ -594,10 +594,8 @@ def main(config_path, run_name):
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
 
             if start_ds:
-                d_loss = adv_weight * (
-                    dl(wav.detach(), y_rec.detach(), extra_disc_weights).mean()
-                    / accum_steps
-                )
+                d_loss_raw = dl(wav.detach(), y_rec.detach(), extra_disc_weights).mean()
+                d_loss = adv_weight * (d_loss_raw / accum_steps)
                 d_loss.backward()
                 if is_update_step:
                     torch.nn.utils.clip_grad_norm_(
@@ -615,6 +613,7 @@ def main(config_path, run_name):
                     for disc_key in extra_discriminators:
                         optimizer.step_and_scheduler(disc_key)
             else:
+                d_loss_raw = 0
                 d_loss = 0
 
             loss_mel = stft_loss(y_rec, wav)
@@ -801,6 +800,7 @@ def main(config_path, run_name):
                 writer.add_scalar("train/mel_loss", avg_mel_loss, iters)
                 writer.add_scalar("train/gen_loss", metric_value(loss_gen_all), iters)
                 writer.add_scalar("train/d_loss", metric_value(d_loss), iters)
+                writer.add_scalar("train/d_loss_raw", metric_value(d_loss_raw), iters)
                 writer.add_scalar("train/ce_loss", metric_value(loss_ce), iters)
                 writer.add_scalar("train/dur_loss", metric_value(loss_dur), iters)
                 writer.add_scalar("train/slm_loss", metric_value(loss_lm), iters)

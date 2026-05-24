@@ -424,14 +424,12 @@ def main(config_path, run_name):
 
             # discriminator loss — accumulate over grad_accum steps, step only at boundary
             if epoch >= TMA_epoch:
-                d_loss = adv_weight * (
-                    dl(
-                        wav.detach().unsqueeze(1).float(),
-                        y_rec.detach(),
-                        extra_disc_weights,
-                    ).mean()
-                    / accum_steps
-                )
+                d_loss_raw = dl(
+                    wav.detach().unsqueeze(1).float(),
+                    y_rec.detach(),
+                    extra_disc_weights,
+                ).mean()
+                d_loss = adv_weight * (d_loss_raw / accum_steps)
                 accelerator.backward(d_loss)
                 if is_update_step:
                     accelerator.clip_grad_norm_(
@@ -449,6 +447,7 @@ def main(config_path, run_name):
                     for disc_key in extra_discriminators:
                         optimizer.step_and_scheduler(disc_key)
             else:
+                d_loss_raw = 0
                 d_loss = 0
 
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
@@ -527,6 +526,7 @@ def main(config_path, run_name):
                 writer.add_scalar("train/mel_loss", avg_mel_loss, iters)
                 writer.add_scalar("train/gen_loss", metric_value(loss_gen_all), iters)
                 writer.add_scalar("train/d_loss", metric_value(d_loss), iters)
+                writer.add_scalar("train/d_loss_raw", metric_value(d_loss_raw), iters)
                 writer.add_scalar("train/mono_loss", metric_value(loss_mono), iters)
                 writer.add_scalar("train/s2s_loss", metric_value(loss_s2s), iters)
                 writer.add_scalar("train/slm_loss", metric_value(loss_slm), iters)
