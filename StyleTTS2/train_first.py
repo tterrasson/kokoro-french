@@ -106,6 +106,7 @@ def main(config_path, run_name):
     min_length = data_params["min_length"]
     OOD_data = data_params["OOD_data"]
     num_workers = data_params.get("num_workers", 2)
+    mel_cache_dir = data_params.get("mel_cache_dir", None)
 
     max_len = config.get("max_len", 200)
 
@@ -121,6 +122,7 @@ def main(config_path, run_name):
         num_workers=num_workers,
         dataset_config={},
         device=device,
+        mel_cache_dir=mel_cache_dir,
     )
 
     val_dataloader = build_dataloader(
@@ -133,6 +135,7 @@ def main(config_path, run_name):
         num_workers=0,
         device=device,
         dataset_config={},
+        mel_cache_dir=mel_cache_dir,
     )
 
     with accelerator.main_process_first():

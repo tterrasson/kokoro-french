@@ -1071,7 +1071,7 @@ def main():
         "--rename-speakers",
         nargs="+",
         metavar="OLD=NEW",
-        help="Rename speaker IDs (e.g. d_speaker0=df_camille d_speaker1=dm_pierre)",
+        help="Rename speaker IDs (e.g. d_speaker0=ff_camille d_speaker1=fm_pierre)",
     )
 
     # stats

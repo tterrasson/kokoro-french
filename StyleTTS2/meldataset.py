@@ -1,17 +1,14 @@
 # coding: utf-8
-import os
 import os.path as osp
-import time
 import random
-import numpy as np
-import random
-import soundfile as sf
-import librosa
 
+import librosa
+import numpy as np
+import pandas as pd
+import soundfile as sf
 import torch
-from torch import nn
-import torch.nn.functional as F
 import torchaudio
+from kokoro_symbols import TextCleaner
 from torch.utils.data import DataLoader
 
 import logging
@@ -19,16 +16,10 @@ import logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-import pandas as pd
-
-from kokoro_symbols import symbols, dicts, TextCleaner
-
 np.random.seed(1)
 random.seed(1)
 SPECT_PARAMS = {"n_fft": 2048, "win_length": 1200, "hop_length": 300}
-MEL_PARAMS = {
-    "n_mels": 80,
-}
+MEL_PARAMS = {"n_mels": 80}
 
 to_mel = torchaudio.transforms.MelSpectrogram(
     n_mels=80, n_fft=2048, win_length=1200, hop_length=300
@@ -53,12 +44,9 @@ class FilePathDataset(torch.utils.data.Dataset):
         validation=False,
         OOD_data="Data/OOD_texts.txt",
         min_length=50,
+        mel_cache_dir=None,
     ):
-
-        spect_params = SPECT_PARAMS
-        mel_params = MEL_PARAMS
-
-        _data_list = [l.strip().split("|") for l in data_list]
+        _data_list = [line.strip().split("|") for line in data_list]
         self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
         self.text_cleaner = TextCleaner()
         self.sr = sr
@@ -73,8 +61,6 @@ class FilePathDataset(torch.utils.data.Dataset):
         unique_speakers = sorted(set(d[2] for d in self.data_list))
         self.speaker2id = {s: i for i, s in enumerate(unique_speakers)}
 
-        self.to_melspec = torchaudio.transforms.MelSpectrogram(**MEL_PARAMS)
-
         self.mean, self.std = -4, 4
         self.data_augmentation = data_augmentation and (not validation)
         self.max_mel_length = 192
@@ -87,19 +73,35 @@ class FilePathDataset(torch.utils.data.Dataset):
         self.ptexts = [t for t in self.ptexts if len(self.text_cleaner(t)) <= 510]
 
         self.root_path = root_path
+        self.mel_cache_dir = mel_cache_dir
 
     def __len__(self):
         return len(self.data_list)
+
+    def _mel_cache_path(self, wave_path):
+        if self.mel_cache_dir is None:
+            return None
+        stem = wave_path.replace("/", "_").replace(".wav", "")
+        return osp.join(self.mel_cache_dir, f"{stem}.npy")
+
+    def _load_mel(self, wave_path, wave):
+        """Load mel from cache if available, else compute from wave.
+
+        Cache stores raw log-mel (no normalization); normalization is applied here
+        so the output is identical to preprocess(wave).squeeze().
+        """
+        cache_path = self._mel_cache_path(wave_path)
+        if cache_path and osp.exists(cache_path):
+            log_mel = np.load(cache_path)
+            return (torch.from_numpy(log_mel).float() - mean) / std
+        return preprocess(wave).squeeze()
 
     def __getitem__(self, idx):
         data = self.data_list[idx]
         path = data[0]
 
         wave, text_tensor, speaker_id = self._load_tensor(data)
-
-        mel_tensor = preprocess(wave).squeeze()
-
-        acoustic_feature = mel_tensor.squeeze()
+        acoustic_feature = self._load_mel(path, wave)
         length_feature = acoustic_feature.size(1)
         acoustic_feature = acoustic_feature[:, : (length_feature - length_feature % 2)]
 
@@ -108,9 +110,8 @@ class FilePathDataset(torch.utils.data.Dataset):
         ref_mel_tensor, ref_label = self._load_data(ref_data[:3])
 
         # get OOD text
-
         ps = ""
-
+        ref_text = ""
         while len(ps) < self.min_length:
             rand_idx = np.random.randint(0, len(self.ptexts) - 1)
             ps = self.ptexts[rand_idx]
@@ -145,24 +146,21 @@ class FilePathDataset(torch.utils.data.Dataset):
         wave = np.concatenate([np.zeros([5000]), wave, np.zeros([5000])], axis=0)
 
         text = self.text_cleaner(text)
-
         text.insert(0, 0)
         text.append(0)
-
         text = torch.LongTensor(text)
 
         return wave, text, speaker_id
 
     def _load_data(self, data):
+        wave_path = data[0]
         wave, text_tensor, speaker_id = self._load_tensor(data)
-        mel_tensor = preprocess(wave).squeeze()
+        mel_tensor = self._load_mel(wave_path, wave)
 
         mel_length = mel_tensor.size(1)
         if mel_length > self.max_mel_length:
             random_start = np.random.randint(0, mel_length - self.max_mel_length)
-            mel_tensor = mel_tensor[
-                :, random_start : random_start + self.max_mel_length
-            ]
+            mel_tensor = mel_tensor[:, random_start : random_start + self.max_mel_length]
 
         return mel_tensor, speaker_id
 
@@ -256,14 +254,15 @@ def build_dataloader(
     device="cpu",
     collate_config={},
     dataset_config={},
+    mel_cache_dir=None,
 ):
-
     dataset = FilePathDataset(
         path_list,
         root_path,
         OOD_data=OOD_data,
         min_length=min_length,
         validation=validation,
+        mel_cache_dir=mel_cache_dir,
         **dataset_config,
     )
     collate_fn = Collater(**collate_config)

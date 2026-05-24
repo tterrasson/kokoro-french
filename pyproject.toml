@@ -39,6 +39,7 @@ dependencies = [
     "tensorboard>=2.20.0",
     "torch==2.12.0",
     "torchaudio==2.11.0",
+    "torchcodec>=0.13.0",
     "torchvision",
     "tqdm>=4.67.0",
     "transformers",

@@ -22,6 +22,7 @@ data_params:
   root_path: "/local/LJSpeech-1.1/wavs"
   OOD_data: "Data/OOD_texts.txt"
   min_length: 50 # sample until texts with this size are obtained for OOD texts
+  mel_cache_dir: "../training/mels"  # precomputed by: uv run python scripts/prepare_training.py precompute
 
 preprocess_params:
   sr: 24000

@@ -20,12 +20,13 @@ Usage:
 
 import argparse
 import json
+import multiprocessing
 import random
 import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-import numpy as np
 from huggingface_hub import hf_hub_download
 from misaki import espeak
 from tqdm import tqdm
@@ -42,7 +43,6 @@ TRAIN_LIST = TRAINING_DIR / "train_list.txt"
 VAL_LIST = TRAINING_DIR / "val_list.txt"
 OOD_FILE = TRAINING_DIR / "OOD_texts.txt"
 MELS_DIR = TRAINING_DIR / "mels"
-F0_DIR = TRAINING_DIR / "f0"
 
 # ── Audio params (must match Kokoro/StyleTTS2 config) ────────────────────────
 
@@ -51,8 +51,6 @@ N_FFT = 2048
 HOP_LENGTH = 300
 WIN_LENGTH = 1200
 N_MELS = 80
-F_MIN = 0
-F_MAX = 8000
 
 # ── Split ────────────────────────────────────────────────────────────────────
 
@@ -61,14 +59,14 @@ RANDOM_SEED = 42
 
 
 def cmd_prepare():
-    """Generate train/val lists and optionally precompute mels and F0."""
+    """Generate train/val lists and optionally precompute mels."""
     TRAINING_DIR.mkdir(parents=True, exist_ok=True)
 
     # ── Load metadata and phonemes ───────────────────────────────────────
     if not METADATA_FILE.exists() or not PHONEMES_FILE.exists():
         print("ERROR: metadata.csv or phonemes.csv not found.")
         print(
-            "Run: uv run python scripts/prepare_dataset.py format --rename-speakers d_speaker0=df_camille d_speaker1=dm_pierre"
+            "Run: uv run python scripts/prepare_dataset.py format --rename-speakers d_speaker0=ff_camille d_speaker1=fm_pierre"
         )
         sys.exit(1)
 
@@ -206,21 +204,66 @@ def cmd_prepare():
     print(f"Training data ready in {TRAINING_DIR}/")
     print(f"  train_list.txt  : {len(train_entries):,} entries")
     print(f"  val_list.txt    : {len(val_entries):,} entries")
-    print(f"  OOD_texts.txt   : out-of-domain French sentences")
+    print("  OOD_texts.txt   : out-of-domain French sentences")
     print(f"  Audio dir       : {WAVS_DIR}/")
     print(f"{'=' * 60}")
 
 
+def _precompute_worker(args):
+    """Top-level worker (must be at module level for multiprocessing pickling)."""
+    filename, wav_path_str, mel_path_str = args
+    mel_path = Path(mel_path_str)
+
+    if mel_path.exists():
+        return "skip", filename
+
+    import librosa
+    import numpy as np
+    import soundfile as sf
+    import torch
+    import torchaudio
+
+    try:
+        # match meldataset._load_tensor EXACTLY: soundfile read, channel 0 for
+        # stereo, librosa resample to 24k — so cached mels are bit-identical to
+        # the on-the-fly path (torchaudio.load + its resampler would differ)
+        wave, sr = sf.read(wav_path_str)
+        if wave.ndim == 2 and wave.shape[-1] == 2:
+            wave = wave[:, 0].squeeze()
+        if sr != SAMPLE_RATE:
+            wave = librosa.resample(wave, orig_sr=sr, target_sr=SAMPLE_RATE)
+
+        # meldataset prepends/appends 5000 zero-samples before computing mel
+        wave = np.concatenate([np.zeros(5000), wave, np.zeros(5000)], axis=0)
+
+        # MUST match meldataset.to_mel EXACTLY (uses torchaudio defaults:
+        # sample_rate=16000, power=2.0, f_max=None) — overriding any of these
+        # produces a different mel filterbank/scale and breaks cache equivalence.
+        mel_transform = torchaudio.transforms.MelSpectrogram(
+            n_fft=N_FFT,
+            win_length=WIN_LENGTH,
+            hop_length=HOP_LENGTH,
+            n_mels=N_MELS,
+        )
+        mel = mel_transform(torch.from_numpy(wave).float())
+        # store raw log-mel (matches preprocess's log(1e-5 + mel) before normalization);
+        # meldataset._load_mel applies (x - mean) / std on load
+        mel = torch.log(1e-5 + mel)
+        np.save(mel_path_str, mel.numpy())
+
+        return "ok", filename
+    except Exception as e:
+        return "error", f"{filename}: {e}"
+
+
 def cmd_precompute():
-    """Pre-compute mel spectrograms and F0 for all training audio.
+    """Pre-compute mel spectrograms for all training audio.
 
     This is optional but saves significant time during GPU training.
     Run before starting training to save time during GPU training.
     """
     MELS_DIR.mkdir(parents=True, exist_ok=True)
-    F0_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Collect all wav files from train + val lists
     wav_files = set()
     for list_file in [TRAIN_LIST, VAL_LIST]:
         if not list_file.exists():
@@ -231,73 +274,37 @@ def cmd_precompute():
                 filename = line.strip().split("|")[0]
                 wav_files.add(filename)
 
-    print(f"Pre-computing features for {len(wav_files):,} files...")
+    print(f"Pre-computing mels for {len(wav_files):,} files...")
 
-    import librosa
-    import torch
-    import torchaudio
+    tasks = [
+        (
+            filename,
+            str(WAVS_DIR / filename),
+            str(MELS_DIR / filename.replace("/", "_").replace(".wav", ".npy")),
+        )
+        for filename in sorted(wav_files)
+    ]
 
-    # Set up mel spectrogram transform
-    mel_transform = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE,
-        n_fft=N_FFT,
-        win_length=WIN_LENGTH,
-        hop_length=HOP_LENGTH,
-        n_mels=N_MELS,
-        f_min=F_MIN,
-        f_max=F_MAX,
-        power=1.0,  # amplitude spectrogram
-        normalized=False,
-    )
+    n_workers = multiprocessing.cpu_count()
+    print(f"Using {n_workers} workers...")
 
-    errors = 0
-    skipped = 0
-    computed = 0
-
-    for filename in tqdm(sorted(wav_files), desc="Features"):
-        wav_path = WAVS_DIR / filename
-        mel_path = MELS_DIR / (filename.replace("/", "_").replace(".wav", ".npy"))
-        f0_path = F0_DIR / (filename.replace("/", "_").replace(".wav", ".npy"))
-
-        if mel_path.exists() and f0_path.exists():
-            skipped += 1
-            continue
-
-        try:
-            # Load audio
-            waveform, sr = torchaudio.load(str(wav_path))
-            if sr != SAMPLE_RATE:
-                waveform = torchaudio.functional.resample(waveform, sr, SAMPLE_RATE)
-
-            # Ensure mono
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
-
-            # Compute mel spectrogram
-            mel = mel_transform(waveform)
-            mel = torch.log(torch.clamp(mel, min=1e-5))
-            np.save(str(mel_path), mel.squeeze(0).numpy())
-
-            # Compute F0 using pyin
-            y = waveform.squeeze().numpy()
-            f0, voiced_flag, voiced_probs = librosa.pyin(
-                y,
-                fmin=librosa.note_to_hz("C2"),
-                fmax=librosa.note_to_hz("C7"),
-                sr=SAMPLE_RATE,
-                hop_length=HOP_LENGTH,
-            )
-            f0 = np.nan_to_num(f0, nan=0.0)
-            np.save(str(f0_path), f0)
-
-            computed += 1
-        except Exception as e:
-            print(f"ERROR {filename}: {e}")
-            errors += 1
+    errors = skipped = computed = 0
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        futures = {executor.submit(_precompute_worker, t): t[0] for t in tasks}
+        with tqdm(total=len(tasks), desc="Mels") as pbar:
+            for future in as_completed(futures):
+                status, info = future.result()
+                if status == "skip":
+                    skipped += 1
+                elif status == "ok":
+                    computed += 1
+                else:
+                    print(f"\nERROR {info}")
+                    errors += 1
+                pbar.update(1)
 
     print(f"\nComputed: {computed}  Skipped: {skipped}  Errors: {errors}")
     print(f"Mels: {MELS_DIR}/")
-    print(f"F0:   {F0_DIR}/")
 
 
 def cmd_convert_weights(force: bool = False):
@@ -632,7 +639,7 @@ def main():
     subparsers.add_parser("prepare", help="Generate train/val lists from dataset")
     subparsers.add_parser(
         "precompute",
-        help="Pre-compute mel spectrograms and F0 (optional, saves GPU time)",
+        help="Pre-compute mel spectrograms (optional, saves GPU time)",
     )
     p_convert = subparsers.add_parser(
         "convert-weights", help="Convert Kokoro-82M weights to StyleTTS2 format"
