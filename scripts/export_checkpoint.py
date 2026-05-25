@@ -17,8 +17,8 @@ from pathlib import Path
 def export_checkpoint(checkpoint_path: str, output_path: str) -> str:
     """Convert a StyleTTS2 Stage 2 checkpoint to Kokoro KModel format.
 
-    Extracts the 5 inference components (bert, bert_encoder, predictor,
-    text_encoder, decoder) from the training checkpoint. All state dict
+    Extracts the inference components (bert, bert_encoder, predictor,
+    text_encoder, decoder, and diffusion when present) from the training checkpoint. All state dict
     keys must have the 'module.' prefix for KModel's loading fallback
     to work correctly.
     """
@@ -35,7 +35,7 @@ def export_checkpoint(checkpoint_path: str, output_path: str) -> str:
         }
 
     kokoro_weights = {}
-    for key in ["bert", "bert_encoder", "predictor", "text_encoder", "decoder"]:
+    for key in ["bert", "bert_encoder", "predictor", "text_encoder", "decoder", "diffusion"]:
         if key in net:
             kokoro_weights[key] = ensure_module_prefix(net[key])
             print(f"  {key}: {len(kokoro_weights[key])} keys")

@@ -4,10 +4,10 @@ from typing import Any, Callable, List, Optional, Tuple, Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange, reduce
+from einops import rearrange
 from torch import Tensor
 
-from .utils import *
+from .utils import default, exists
 
 """
 Diffusion Training
@@ -222,7 +222,7 @@ class KDiffusion(Diffusion):
         # Add noise to input
         noise = default(noise, lambda: torch.randn_like(x))
         x_noisy = x + sigmas_padded * noise
-        
+
         # Compute denoised values
         x_denoised = self.denoise_fn(x_noisy, sigmas=sigmas, **kwargs)
 
@@ -377,6 +377,7 @@ class VSampler(Sampler):
         x = sigmas[0] * noise
         alpha, beta = self.get_alpha_beta(sigmas[0].item())
 
+        x_pred = None
         for i in range(num_steps - 1):
             is_last = i == num_steps - 1
 
@@ -387,6 +388,8 @@ class VSampler(Sampler):
             if not is_last:
                 alpha, beta = self.get_alpha_beta(sigmas[i + 1].item())
                 x = x_pred * alpha + x_eps * beta
+
+        assert x_pred is not None
 
         return x_pred
 
@@ -643,7 +646,7 @@ class SpanBySpanComposer(nn.Module):
         inpaint[:, :, :half_length] = start[:, :, half_length:]
         inpaint_mask = sequential_mask(like=start, start=half_length)
 
-        for i in range(self.num_spans):
+        for _ in range(self.num_spans):
             # Inpaint second half
             span = self.inpainter(inpaint=inpaint, inpaint_mask=inpaint_mask)
             # Replace first half with generated second half

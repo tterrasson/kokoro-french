@@ -1,14 +1,9 @@
-from math import pi
-from random import randint
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Optional
 
-import torch
-from einops import rearrange
 from torch import Tensor, nn
-from tqdm import tqdm
 
-from .utils import *
-from .sampler import *
+from .utils import groupby
+from .sampler import Diffusion, LinearSchedule, UniformDistribution, VSampler
 
 """
 Diffusion Classes (generic for 1d data)
@@ -20,12 +15,14 @@ class Model1d(nn.Module):
         super().__init__()
         diffusion_kwargs, kwargs = groupby("diffusion_", kwargs)
         self.unet = None
-        self.diffusion = None
+        self.diffusion: Optional[Diffusion] = None
 
     def forward(self, x: Tensor, **kwargs) -> Tensor:
+        assert self.diffusion is not None
         return self.diffusion(x, **kwargs)
 
     def sample(self, *args, **kwargs) -> Tensor:
+        assert self.diffusion is not None
         return self.diffusion.sample(*args, **kwargs)
 
 
@@ -90,5 +87,3 @@ class AudioDiffusionConditional(Model1d):
             embedding_scale=5.0,
         )
         return super().sample(*args, **{**default_kwargs, **kwargs})
-
-

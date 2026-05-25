@@ -1,12 +1,29 @@
-from .istftnet import Decoder
-from .modules import CustomAlbert, ProsodyPredictor, TextEncoder
+import json
 from dataclasses import dataclass
+from typing import Dict, Optional, Union
+
+import torch
 from huggingface_hub import hf_hub_download
 from loguru import logger
 from transformers import AlbertConfig
-from typing import Dict, Optional, Union
-import json
-import torch
+
+from .istftnet import Decoder
+from .modules import CustomAlbert, ProsodyPredictor, TextEncoder
+
+try:
+    from StyleTTS2.Modules.diffusion.diffusion import AudioDiffusionConditional
+    from StyleTTS2.Modules.diffusion.modules import StyleTransformer1d, Transformer1d
+    from StyleTTS2.Modules.diffusion.sampler import (
+        ADPM2Sampler,
+        DiffusionSampler,
+        KarrasSchedule,
+        KDiffusion,
+        LogNormalDistribution,
+    )
+except ImportError:
+    AudioDiffusionConditional = StyleTransformer1d = Transformer1d = None
+    ADPM2Sampler = DiffusionSampler = KarrasSchedule = KDiffusion = LogNormalDistribution = None
+
 
 class KModel(torch.nn.Module):
     '''
@@ -63,16 +80,74 @@ class KModel(torch.nn.Module):
             dim_in=config['hidden_dim'], style_dim=config['style_dim'],
             dim_out=config['n_mels'], disable_complex=disable_complex, **config['istftnet']
         )
+        self.diffusion = self._build_diffusion(config)
+        self.diffusion_available = False
         if not model:
             model = hf_hub_download(repo_id=repo_id, filename=KModel.MODEL_NAMES[repo_id])
         for key, state_dict in torch.load(model, map_location='cpu', weights_only=True).items():
             assert hasattr(self, key), key
+            if key == 'diffusion' and self.diffusion is None:
+                logger.warning("Ignoring diffusion state_dict because diffusion modules are not importable")
+                continue
             try:
                 getattr(self, key).load_state_dict(state_dict)
             except:
                 logger.debug(f"Did not load {key} from state_dict")
                 state_dict = {k[7:]: v for k, v in state_dict.items()}
                 getattr(self, key).load_state_dict(state_dict, strict=False)
+            if key == 'diffusion':
+                self.diffusion_available = True
+
+    def _build_diffusion(self, config: Dict) -> Optional[torch.nn.Module]:
+        if AudioDiffusionConditional is None:
+            return None
+
+        style_dim = int(config['style_dim'])
+        diffusion_config = config.get('diffusion') or {}
+        transformer_config = diffusion_config.get('transformer') or {}
+        dist_config = diffusion_config.get('dist') or {}
+        transformer_defaults = {
+            'num_layers': 3,
+            'num_heads': 8,
+            'head_features': 64,
+            'multiplier': 2,
+        }
+        transformer_defaults.update(transformer_config)
+
+        if config.get('multispeaker', True):
+            transformer = StyleTransformer1d(
+                channels=style_dim * 2,
+                context_embedding_features=self.bert.config.hidden_size,
+                context_features=style_dim * 2,
+                **transformer_defaults,
+            )
+        else:
+            transformer = Transformer1d(
+                channels=style_dim * 2,
+                context_embedding_features=self.bert.config.hidden_size,
+                **transformer_defaults,
+            )
+
+        diffusion = AudioDiffusionConditional(
+            in_channels=1,
+            embedding_max_length=self.bert.config.max_position_embeddings,
+            embedding_features=self.bert.config.hidden_size,
+            embedding_mask_proba=float(diffusion_config.get('embedding_mask_proba', 0.1)),
+            channels=style_dim * 2,
+            context_features=style_dim * 2,
+        )
+        diffusion.diffusion = KDiffusion(
+            net=transformer,
+            sigma_distribution=LogNormalDistribution(
+                mean=float(dist_config.get('mean', -3.0)),
+                std=float(dist_config.get('std', 1.0)),
+            ),
+            sigma_data=float(dist_config.get('sigma_data', 0.2)),
+            dynamic_threshold=0.0,
+        )
+        diffusion.diffusion.net = transformer
+        diffusion.unet = transformer
+        return diffusion
 
     @property
     def device(self):
@@ -88,7 +163,12 @@ class KModel(torch.nn.Module):
         self,
         input_ids: torch.LongTensor,
         ref_s: torch.FloatTensor,
-        speed: float = 1
+        speed: float = 1,
+        diffusion_steps: int = 0,
+        diffusion_seed: Optional[int] = None,
+        diffusion_alpha: float = 0.1,
+        diffusion_beta: float = 0.5,
+        embedding_scale: float = 1.0,
     ) -> tuple[torch.FloatTensor, torch.LongTensor]:
         input_lengths = torch.full(
             (input_ids.shape[0],), 
@@ -100,6 +180,15 @@ class KModel(torch.nn.Module):
         text_mask = torch.arange(input_lengths.max()).unsqueeze(0).expand(input_lengths.shape[0], -1).type_as(input_lengths)
         text_mask = torch.gt(text_mask+1, input_lengths.unsqueeze(1)).to(self.device)
         bert_dur = self.bert(input_ids, attention_mask=(~text_mask).int())
+        ref_s = self.sample_diffusion_style(
+            bert_dur,
+            ref_s,
+            steps=diffusion_steps,
+            seed=diffusion_seed,
+            alpha=diffusion_alpha,
+            beta=diffusion_beta,
+            embedding_scale=embedding_scale,
+        )
         d_en = self.bert_encoder(bert_dur).transpose(-1, -2)
         s = ref_s[:, 128:]
         d = self.predictor.text_encoder(d_en, s, input_lengths, text_mask)
@@ -118,19 +207,87 @@ class KModel(torch.nn.Module):
         audio = self.decoder(asr, F0_pred, N_pred, ref_s[:, :128]).squeeze()
         return audio, pred_dur
 
+    @torch.no_grad()
+    def sample_diffusion_style(
+        self,
+        bert_dur: torch.FloatTensor,
+        ref_s: torch.FloatTensor,
+        steps: int = 0,
+        seed: Optional[int] = None,
+        alpha: float = 0.1,
+        beta: float = 0.5,
+        embedding_scale: float = 1.0,
+    ) -> torch.FloatTensor:
+        if steps <= 0:
+            return ref_s
+        if self.diffusion is None or not self.diffusion_available:
+            raise RuntimeError("This KModel was not loaded with trained diffusion weights")
+
+        alpha = float(max(0.0, min(1.0, alpha)))
+        beta = float(max(0.0, min(1.0, beta)))
+        if alpha == 0.0 and beta == 0.0:
+            return ref_s
+
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(device=ref_s.device)
+            generator.manual_seed(int(seed))
+
+        noise = torch.randn(
+            ref_s.shape[0],
+            1,
+            ref_s.shape[1],
+            device=ref_s.device,
+            dtype=ref_s.dtype,
+            generator=generator,
+        )
+        sampler = DiffusionSampler(
+            self.diffusion.diffusion,
+            sampler=ADPM2Sampler(),
+            sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0),
+            clamp=False,
+        )
+        sampled = sampler(
+            noise=noise,
+            embedding=bert_dur,
+            embedding_scale=float(embedding_scale),
+            features=ref_s,
+            embedding_mask_proba=0.0,
+            num_steps=int(steps),
+        ).squeeze(1)
+
+        blended = ref_s.clone()
+        blended[:, :128] = (1.0 - alpha) * ref_s[:, :128] + alpha * sampled[:, :128]
+        blended[:, 128:] = (1.0 - beta) * ref_s[:, 128:] + beta * sampled[:, 128:]
+        return blended
+
     def forward(
         self,
         phonemes: str,
         ref_s: torch.FloatTensor,
         speed: float = 1,
-        return_output: bool = False
+        return_output: bool = False,
+        diffusion_steps: int = 0,
+        diffusion_seed: Optional[int] = None,
+        diffusion_alpha: float = 0.1,
+        diffusion_beta: float = 0.5,
+        embedding_scale: float = 1.0,
     ) -> Union['KModel.Output', torch.FloatTensor]:
         input_ids = list(filter(lambda i: i is not None, map(lambda p: self.vocab.get(p), phonemes)))
         logger.debug(f"phonemes: {phonemes} -> input_ids: {input_ids}")
         assert len(input_ids)+2 <= self.context_length, (len(input_ids)+2, self.context_length)
         input_ids = torch.LongTensor([[0, *input_ids, 0]]).to(self.device)
         ref_s = ref_s.to(self.device)
-        audio, pred_dur = self.forward_with_tokens(input_ids, ref_s, speed)
+        audio, pred_dur = self.forward_with_tokens(
+            input_ids,
+            ref_s,
+            speed,
+            diffusion_steps=diffusion_steps,
+            diffusion_seed=diffusion_seed,
+            diffusion_alpha=diffusion_alpha,
+            diffusion_beta=diffusion_beta,
+            embedding_scale=embedding_scale,
+        )
         audio = audio.squeeze().cpu()
         pred_dur = pred_dur.cpu() if pred_dur is not None else None
         logger.debug(f"pred_dur: {pred_dur}")

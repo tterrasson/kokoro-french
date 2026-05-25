@@ -50,8 +50,8 @@ TEST_SENTENCES = [
 def convert_checkpoint(checkpoint_path: str, output_path: str) -> str:
     """Convert a StyleTTS2 Stage 2 checkpoint to Kokoro KModel format.
 
-    Extracts the 5 inference components (bert, bert_encoder, predictor,
-    text_encoder, decoder) from the training checkpoint. All state dict
+    Extracts the inference components (bert, bert_encoder, predictor,
+    text_encoder, decoder, and diffusion when present) from the training checkpoint. All state dict
     keys must have the 'module.' prefix for KModel's loading fallback
     to work correctly.
 
@@ -73,7 +73,7 @@ def convert_checkpoint(checkpoint_path: str, output_path: str) -> str:
         }
 
     kokoro_weights = {}
-    for key in ["bert", "bert_encoder", "predictor", "text_encoder", "decoder"]:
+    for key in ["bert", "bert_encoder", "predictor", "text_encoder", "decoder", "diffusion"]:
         if key in net:
             kokoro_weights[key] = ensure_module_prefix(net[key])
             print(f"  {key}: {len(kokoro_weights[key])} keys")
@@ -94,6 +94,11 @@ def run_inference(
     config_path: str,
     output_dir: str,
     device: str = "auto",
+    diffusion_steps: int = 0,
+    diffusion_seed: int | None = None,
+    diffusion_alpha: float = 0.1,
+    diffusion_beta: float = 0.5,
+    embedding_scale: float = 1.0,
 ):
     """Run inference on the German test set."""
     import torch
@@ -126,7 +131,16 @@ def run_inference(
     for i, text in enumerate(TEST_SENTENCES):
         print(f"[{i + 1}/{len(TEST_SENTENCES)}] {text[:60]}...")
         try:
-            generator = pipeline(text, voice=voice, speed=1)
+            generator = pipeline(
+                text,
+                voice=voice,
+                speed=1,
+                diffusion_steps=diffusion_steps,
+                diffusion_seed=diffusion_seed,
+                diffusion_alpha=diffusion_alpha,
+                diffusion_beta=diffusion_beta,
+                embedding_scale=embedding_scale,
+            )
             all_audio = []
             for _, ps, audio in generator:
                 assert ps is not None
@@ -184,6 +198,36 @@ def main():
         choices=["auto", "cpu", "cuda"],
         help="Device to run on (default: auto)",
     )
+    parser.add_argument(
+        "--diffusion-steps",
+        type=int,
+        default=0,
+        help="Enable diffusion style sampling with this many denoising steps (0 = deterministic voicepack)",
+    )
+    parser.add_argument(
+        "--diffusion-seed",
+        type=int,
+        default=None,
+        help="Seed for repeatable diffusion style sampling",
+    )
+    parser.add_argument(
+        "--diffusion-alpha",
+        type=float,
+        default=0.1,
+        help="Blend for acoustic/timbre style when diffusion is enabled",
+    )
+    parser.add_argument(
+        "--diffusion-beta",
+        type=float,
+        default=0.5,
+        help="Blend for prosodic style when diffusion is enabled",
+    )
+    parser.add_argument(
+        "--embedding-scale",
+        type=float,
+        default=1.0,
+        help="Classifier-free guidance scale for diffusion style sampling",
+    )
 
     args = parser.parse_args()
 
@@ -202,6 +246,11 @@ def main():
         config_path=args.config,
         output_dir=args.output_dir,
         device=args.device,
+        diffusion_steps=args.diffusion_steps,
+        diffusion_seed=args.diffusion_seed,
+        diffusion_alpha=args.diffusion_alpha,
+        diffusion_beta=args.diffusion_beta,
+        embedding_scale=args.embedding_scale,
     )
 
 

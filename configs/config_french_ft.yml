@@ -2,7 +2,7 @@ batch_size: 2
 grad_accum: 4
 epochs: 15
 epochs_1st: 15
-epochs_2nd: 15
+epochs_2nd: 25
 save_freq: 1
 pretrained_model: "../training/kokoro_base.pth"
 first_stage_path: "first_stage.pth"
@@ -21,7 +21,7 @@ torch_compile:
 # Kokoro French Fine-Tuning Config
 # ─────────────────────────────────────────────────────────────────────────────
 # Based on StyleTTS2 config_ft.yml, adapted for:
-# - Kokoro-82M architecture (ISTFTNet vocoder, no diffusion)
+# - Kokoro-82M architecture (ISTFTNet vocoder + optional diffusion style sampler)
 # - French multi-speaker fine-tuning
 # - Conservative fine-tuning from pre-trained English checkpoint
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,11 +153,11 @@ loss_params:
   lambda_msstft_fm: 0.50
   lambda_subband_adv: 0.05
   lambda_subband_fm: 0.25
-  lambda_diff: 0.0                  # diffusion loss (0 = disabled, no diffusion)
-  lambda_sty: 0.0                   # style reconstruction (0 = disabled)
+  lambda_diff: 1.0                  # diffusion loss for style sampler
+  lambda_sty: 1.0                   # style reconstruction from sampled style
   TMA_epoch: 0                      # start alignment from epoch 0 (fine-tuning, not training from scratch)
-  diff_epoch: 999                   # effectively disable diffusion training
-  joint_epoch: 0                    # start joint training with warmup
+  diff_epoch: 0                     # train diffusion from the start of stage 2
+  joint_epoch: 3                    # start adversarial joint training after diffusion warmup
   adv_warmup_epochs: 3
   slmadv_warmup_epochs: 3
   real_audio_mix_warmup_epochs: 3

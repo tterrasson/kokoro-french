@@ -1,0 +1,5 @@
+{
+  "include": ["kokoro", "StyleTTS2", "scripts"],
+  "extraPaths": ["."],
+  "pythonVersion": "3.10"
+}
