@@ -1,29 +1,36 @@
 batch_size: 2
-grad_accum: 4
-epochs: 15
-epochs_1st: 15
-epochs_2nd: 35
+grad_accum: 8
+epochs_1st: 5                        # refinement round — fewer epochs needed
+epochs_2nd: 30
 save_freq: 1
-pretrained_model: "../training/kokoro_base.pth"
+# ─────────────────────────────────────────────────────────────────────────────
+# ROUND 2 — resume after a full stage 1 + stage 2 cycle
+#
+# Workflow:
+#   1. train_first.py  -p configs/config_french_ft_round2.yml
+#      → loads epoch_2nd_continue.pth, refines acoustic modules
+#      → produces logs/kokoro-french/first_stage.pth (also contains bert/predictor
+#        from the previous cycle, loaded via strict=False but not trained)
+#
+#   2. train_second.py -p configs/config_french_ft_round2.yml
+#      → loads first_stage.pth (second_stage_load_pretrained: false)
+#      → resumes bert/predictor/diffusion training with the refined
+#        acoustic modules from step 1
+#
+# Replace XXXXX with the epoch number of the best stage 2 checkpoint:
+pretrained_model: "logs/kokoro-french/epoch_2nd_continue.pth"
 first_stage_path: "first_stage.pth"
-load_only_params: true
-second_stage_load_pretrained: false  # false = load from first_stage.pth (recommended)
+load_only_params: true               # reset optimizer/scheduler OneCycle (epoch and iters restart from 0)
+second_stage_load_pretrained: false  # load from first_stage.pth (recommended)
 log_interval: 10
 torch_compile:
   enabled: false
-  modules: ["bert_encoder"]  # Use ["bert_encoder"] or "safe" to opt in conservatively
+  modules: []  # Use ["bert_encoder"] or "safe" to opt in conservatively
   mode: "reduce-overhead"
   fullgraph: false
   dynamic: true
   backend: "inductor"
   recompile_limit: 8
-# ─────────────────────────────────────────────────────────────────────────────
-# Kokoro French Fine-Tuning Config
-# ─────────────────────────────────────────────────────────────────────────────
-# Based on StyleTTS2 config_ft.yml, adapted for:
-# - Kokoro-82M architecture (ISTFTNet vocoder + optional diffusion style sampler)
-# - French multi-speaker fine-tuning
-# - Conservative fine-tuning from pre-trained English checkpoint
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -35,8 +42,8 @@ data_params:
   val_data: "../training/val_list.txt"
   root_path: "../dataset/audio"
   OOD_data: "../training/OOD_texts.txt"
-  min_length: 50                    # min phoneme sequence length (chars)
-  num_workers:  16                  # CPU workers for data loading
+  min_length: 50
+  num_workers: 16
 
 # ── Preprocessing ────────────────────────────────────────────────────────────
 preprocess_params:
@@ -49,22 +56,21 @@ preprocess_params:
     fmin: 0
     fmax: 8000
 
-# ── Model Architecture ──────────────────────────────────────────────────────
-# Must match Kokoro-82M exactly to load pre-trained weights
+# ── Model Architecture ───────────────────────────────────────────────────────
 model_params:
   dim_in: 64
-  n_token: 178                      # phoneme vocabulary size (IPA + punctuation)
-  hidden_dim: 512                   # model hidden dimension
-  style_dim: 128                    # style/speaker embedding dimension (x2 = 256 total in voicepack)
-  max_dur: 50                       # max duration per phoneme (in frames)
-  multispeaker: true                # multi speaker fine-tuning
-  n_mels: 80                        # mel spectrogram bands
+  n_token: 178
+  hidden_dim: 512
+  style_dim: 128
+  max_dur: 50
+  multispeaker: true
+  n_mels: 80
   dropout: 0.2
-  n_layer: 3                        # number of layers in text encoder / predictor
+  n_layer: 3
   text_encoder_kernel_size: 5
 
   decoder:
-    type: istftnet                  # Kokoro uses ISTFTNet, NOT hifigan
+    type: istftnet
     upsample_rates: [10, 6]
     upsample_kernel_sizes: [20, 12]
     upsample_initial_channel: 512
@@ -73,7 +79,6 @@ model_params:
     gen_istft_n_fft: 20
     gen_istft_hop_size: 5
 
-  # PLBERT config (phoneme-level BERT for text understanding)
   diffusion:
     embedding_mask_proba: 0.1
     transformer:
@@ -95,7 +100,6 @@ model_params:
     num_hidden_layers: 12
     dropout: 0.1
 
-  # SLM discriminator (WavLM) — used in stage 2 only
   slm:
     model: "microsoft/wavlm-base-plus"
     sr: 16000
@@ -140,45 +144,42 @@ model_params:
 loss_params:
   lambda_gen: 1.0
   lambda_gen_start: 0.05
-  lambda_mel: 5.0                   # mel reconstruction loss
-  lambda_dur: 1.0                   # duration prediction loss
-  lambda_ce: 20.0                   # duration cross-entropy loss
-  lambda_F0: 1.0                    # F0 (pitch) prediction loss
-  lambda_norm: 1.0                  # energy/norm prediction loss
-  lambda_s2s: 1.0                   # sequence-to-sequence loss
-  lambda_mono: 1.0                  # monotonic alignment loss
-  lambda_slm: 1.0                   # SLM adversarial (0 = disabled for stage 1)
+  lambda_mel: 5.0
+  lambda_dur: 1.0
+  lambda_ce: 20.0
+  lambda_F0: 1.0
+  lambda_norm: 1.0
+  lambda_s2s: 1.0
+  lambda_mono: 1.0
+  lambda_slm: 1.0
   lambda_slm_start: 0.05
   lambda_msstft_adv: 0.10
   lambda_msstft_fm: 0.50
   lambda_subband_adv: 0.05
   lambda_subband_fm: 0.25
-  lambda_diff: 1.0                  # diffusion loss for style sampler
-  lambda_sty: 1.0                   # style reconstruction from sampled style
-  TMA_epoch: 0                      # start alignment from epoch 0 (fine-tuning, not training from scratch)
-  diff_epoch: 0                     # train diffusion from the start of stage 2
-  joint_epoch: 3                    # start adversarial joint training after diffusion warmup
+  lambda_diff: 1.0
+  lambda_sty: 1.0
+  TMA_epoch: 0                       # active from the start — model already aligned
+  diff_epoch: 0
+  joint_epoch: 3                     # let diffusion/prosody warm up before adversarial
   adv_warmup_epochs: 3
   slmadv_warmup_epochs: 3
   real_audio_mix_warmup_epochs: 3
 
 # ── Optimizer ────────────────────────────────────────────────────────────────
+# Reduced LR: weights are already well-positioned after cycle 1
 optimizer_params:
-  lr: 0.0001                        # main learning rate
-  bert_lr: 0.00001                  # lower LR for PLBERT (mostly frozen knowledge)
-  ft_lr: 0.0001                     # fine-tuning LR for acoustic modules
-  pct_start: 0.0                    # no warmup (fine-tuning from pretrained)
-  final_div_factor: 5               # LR decays 5x by end of training
-  grad_clip: 5.0                    # max gradient norm to prevent spikes
+  lr: 0.00005                        # half of initial LR (cycle 1 = 0.0001)
+  bert_lr: 0.000005                  # likewise, halved
+  ft_lr: 0.00005
+  pct_start: 0.0                     # no warmup
+  final_div_factor: 10
+  grad_clip: 5.0
 
 # ── Pitch Extractor ──────────────────────────────────────────────────────────
-# StyleTTS2 uses JDC pitch extractor
-# If Utils/JDC/bst.t7 is not available, the training code falls back to other methods
 F0_path: "Utils/JDC/bst.t7"
 
 # ── ASR Alignment Model ─────────────────────────────────────────────────────
-# StyleTTS2's pre-trained alignment model (English)
-# May need to be adapted for German or set TMA_epoch=0 to learn from scratch
 ASR_config: "Utils/ASR/config.yml"
 ASR_path: "Utils/ASR/epoch_00080.pth"
 
