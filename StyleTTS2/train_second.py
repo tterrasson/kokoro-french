@@ -7,6 +7,7 @@ import time
 import traceback
 import warnings
 from logging import StreamHandler
+from typing import cast
 
 import click
 import numpy as np
@@ -37,8 +38,9 @@ from utils import (
 from Utils.PLBERT.util import load_plbert
 
 if getattr(torch, "_original_load", None) is None:
-    torch._original_load = torch.load
-    torch.load = lambda *args, **kwargs: torch._original_load(
+    _original_load = torch.load
+    setattr(torch, "_original_load", _original_load)
+    torch.load = lambda *args, **kwargs: _original_load(
         *args, **{**kwargs, "weights_only": False}
     )
 
@@ -104,8 +106,6 @@ def main(config_path, run_name):
     max_len = config.get("max_len", 200)
 
     loss_params = Munch(config["loss_params"])
-    diff_epoch = loss_params.diff_epoch
-    joint_epoch = loss_params.joint_epoch
     adv_warmup_epochs = int(getattr(loss_params, "adv_warmup_epochs", 3))
     slmadv_warmup_epochs = int(getattr(loss_params, "slmadv_warmup_epochs", 3))
     real_audio_mix_warmup_epochs = int(getattr(loss_params, "real_audio_mix_warmup_epochs", adv_warmup_epochs))
@@ -156,7 +156,7 @@ def main(config_path, run_name):
     plbert = load_plbert(BERT_path)
 
     # build model
-    model_params = recursive_munch(config["model_params"])
+    model_params = cast(Munch, recursive_munch(config["model_params"]))
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
     [model[key].to(device) for key in model]
@@ -191,8 +191,6 @@ def main(config_path, run_name):
             )  # keep starting epoch for tensorboard log
 
             # these epochs should be counted from the start epoch
-            diff_epoch += start_epoch
-            joint_epoch += start_epoch
             epochs += start_epoch
 
             model.predictor_encoder = copy.deepcopy(model.style_encoder)
@@ -299,7 +297,6 @@ def main(config_path, run_name):
     print("BERT", optimizer.optimizers["bert"])
     print("decoder", optimizer.optimizers["decoder"])
 
-    start_ds = True
     running_std = []
 
     slmadv_params = Munch(config["slmadv_params"])
@@ -312,7 +309,7 @@ def main(config_path, run_name):
         batch_percentage=slmadv_params.batch_percentage,
         skip_update=slmadv_params.iter,
         sig=slmadv_params.sig,
-        diffusion_enabled=(diff_epoch < epochs),
+        diffusion_enabled=True,
     )
 
     # ── Kokoro-faithful TensorBoard inference setup ───────────────────────────
@@ -355,7 +352,6 @@ def main(config_path, run_name):
     # ─────────────────────────────────────────────────────────────────────────
 
     steps_per_epoch = max(1, len(train_dataloader))
-    joint_start_step = joint_epoch * steps_per_epoch
     adv_warmup_steps = adv_warmup_epochs * steps_per_epoch
     slmadv_warmup_steps = slmadv_warmup_epochs * steps_per_epoch
     real_audio_mix_warmup_steps = real_audio_mix_warmup_epochs * steps_per_epoch
@@ -363,9 +359,7 @@ def main(config_path, run_name):
         running_loss = 0.0
         running_steps = 0
 
-        _ = [model[key].eval() for key in model]
-
-        _ = [model[key].train() for key in model]
+        [model[key].train() for key in model]
 
         extra_disc_weights = {
             "msstft": (
@@ -387,28 +381,28 @@ def main(config_path, run_name):
             global_step = epoch * steps_per_epoch + i
             adv_weight = linear_warmup_step(
                 global_step,
-                joint_start_step,
+                0,
                 adv_warmup_steps,
                 lambda_gen_start,
                 1.0,
             )
             slm_weight = linear_warmup_step(
                 global_step,
-                joint_start_step,
+                0,
                 adv_warmup_steps,
                 lambda_slm_start,
                 1.0,
             )
             slmadv_weight = linear_warmup_step(
                 global_step,
-                joint_start_step,
+                0,
                 slmadv_warmup_steps,
                 lambda_slm_start,
                 1.0,
             )
             real_audio_mix = linear_warmup_step(
                 global_step,
-                joint_start_step,
+                0,
                 real_audio_mix_warmup_steps,
                 0.0,
                 1.0,
@@ -433,11 +427,10 @@ def main(config_path, run_name):
             # may be shorter than grad_accum) so the loss average is correctly weighted
             accum_steps = min(grad_accum, len(train_dataloader) - (i // grad_accum) * grad_accum)
             if i % grad_accum == 0:
-                if start_ds:
-                    optimizer.optimizers["msd"].zero_grad()
-                    optimizer.optimizers["mpd"].zero_grad()
-                    for disc_key in extra_discriminators:
-                        optimizer.optimizers[disc_key].zero_grad()
+                optimizer.optimizers["msd"].zero_grad()
+                optimizer.optimizers["mpd"].zero_grad()
+                for disc_key in extra_discriminators:
+                    optimizer.optimizers[disc_key].zero_grad()
                 for _k in ["bert_encoder", "bert", "predictor", "predictor_encoder", "diffusion", "style_encoder", "decoder"]:
                     if _k in optimizer.optimizers:
                         optimizer.optimizers[_k].zero_grad()
@@ -463,11 +456,11 @@ def main(config_path, run_name):
                 t_en = model.text_encoder(texts, input_lengths, text_mask)
                 asr = t_en @ s2s_attn_mono
 
-                d_gt = s2s_attn_mono.sum(axis=-1).detach()
+                d_gt = s2s_attn_mono.sum(dim=-1).detach()
 
                 # compute reference styles
                 ref: torch.Tensor | None = None
-                if multispeaker and epoch >= diff_epoch:
+                if multispeaker:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref = torch.cat([ref_ss, ref_sp], dim=1)
@@ -492,47 +485,43 @@ def main(config_path, run_name):
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
 
             # denoiser training
-            if epoch >= diff_epoch:
-                num_steps = np.random.randint(3, 5)
+            num_steps = np.random.randint(3, 5)
 
-                if model_params.diffusion.dist.estimate_sigma_data:
-                    model.diffusion.module.diffusion.sigma_data = (
-                        s_trg.std(axis=-1).mean().item()
-                    )  # batch-wise std estimation
-                    running_std.append(model.diffusion.module.diffusion.sigma_data)
+            if model_params.diffusion.dist.estimate_sigma_data:
+                model.diffusion.module.diffusion.sigma_data = (
+                    s_trg.std(dim=-1).mean().item()
+                )  # batch-wise std estimation
+                running_std.append(model.diffusion.module.diffusion.sigma_data)
 
-                if multispeaker:
-                    s_preds = sampler(
-                        noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
-                        embedding=bert_dur,
-                        embedding_scale=1,
-                        features=ref,  # reference from the same speaker as the embedding
-                        embedding_mask_proba=0.1,
-                        num_steps=num_steps,
-                    ).squeeze(1)
-                    loss_diff = model.diffusion(
-                        s_trg.unsqueeze(1), embedding=bert_dur, features=ref
-                    ).mean()  # EDM loss
-                    loss_sty = F.l1_loss(
-                        s_preds, s_trg.detach()
-                    )  # style reconstruction loss
-                else:
-                    s_preds = sampler(
-                        noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
-                        embedding=bert_dur,
-                        embedding_scale=1,
-                        embedding_mask_proba=0.1,
-                        num_steps=num_steps,
-                    ).squeeze(1)
-                    loss_diff = model.diffusion.module.diffusion(
-                        s_trg.unsqueeze(1), embedding=bert_dur
-                    ).mean()  # EDM loss
-                    loss_sty = F.l1_loss(
-                        s_preds, s_trg.detach()
-                    )  # style reconstruction loss
+            if multispeaker:
+                s_preds = sampler(
+                    noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
+                    embedding=bert_dur,
+                    embedding_scale=1,
+                    features=ref,  # reference from the same speaker as the embedding
+                    embedding_mask_proba=0.1,
+                    num_steps=num_steps,
+                ).squeeze(1)
+                loss_diff = model.diffusion(
+                    s_trg.unsqueeze(1), embedding=bert_dur, features=ref
+                ).mean()  # EDM loss
+                loss_sty = F.l1_loss(
+                    s_preds, s_trg.detach()
+                )  # style reconstruction loss
             else:
-                loss_sty = 0
-                loss_diff = 0
+                s_preds = sampler(
+                    noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
+                    embedding=bert_dur,
+                    embedding_scale=1,
+                    embedding_mask_proba=0.1,
+                    num_steps=num_steps,
+                ).squeeze(1)
+                loss_diff = model.diffusion.module.diffusion(
+                    s_trg.unsqueeze(1), embedding=bert_dur
+                ).mean()  # EDM loss
+                loss_sty = F.l1_loss(
+                    s_preds, s_trg.detach()
+                )  # style reconstruction loss
 
             d, p = model.predictor(d_en, s_dur, input_lengths, s2s_attn_mono, text_mask)
 
@@ -593,34 +582,27 @@ def main(config_path, run_name):
             loss_F0_rec = (F.smooth_l1_loss(F0_real, F0_fake)) / 10
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
 
-            if start_ds:
-                d_loss_raw = dl(wav.detach(), y_rec.detach(), extra_disc_weights).mean()
-                d_loss = adv_weight * (d_loss_raw / accum_steps)
-                d_loss.backward()
-                if is_update_step:
-                    torch.nn.utils.clip_grad_norm_(
-                        list(model["msd"].parameters())
-                        + list(model["mpd"].parameters())
-                        + [
-                            p
-                            for disc_key in extra_discriminators
-                            for p in model[disc_key].parameters()
-                        ],
-                        grad_clip
-                    )
-                    optimizer.step_and_scheduler("msd")
-                    optimizer.step_and_scheduler("mpd")
-                    for disc_key in extra_discriminators:
-                        optimizer.step_and_scheduler(disc_key)
-            else:
-                d_loss_raw = 0
-                d_loss = 0
+            d_loss_raw = dl(wav.detach(), y_rec.detach(), extra_disc_weights).mean()
+            d_loss = adv_weight * (d_loss_raw / accum_steps)
+            d_loss.backward()
+            if is_update_step:
+                torch.nn.utils.clip_grad_norm_(
+                    list(model["msd"].parameters())
+                    + list(model["mpd"].parameters())
+                    + [
+                        p
+                        for disc_key in extra_discriminators
+                        for p in model[disc_key].parameters()
+                    ],
+                    grad_clip
+                )
+                optimizer.step_and_scheduler("msd")
+                optimizer.step_and_scheduler("mpd")
+                for disc_key in extra_discriminators:
+                    optimizer.step_and_scheduler(disc_key)
 
             loss_mel = stft_loss(y_rec, wav)
-            if start_ds:
-                loss_gen_all = gl(wav, y_rec, extra_disc_weights).mean()
-            else:
-                loss_gen_all = 0
+            loss_gen_all = gl(wav, y_rec, extra_disc_weights).mean()
             loss_lm = wl(wav.detach().squeeze(), y_rec.squeeze()).mean()
 
             loss_ce = 0
@@ -631,7 +613,7 @@ def main(config_path, run_name):
                 _s2s_trg = torch.zeros_like(_s2s_pred)
                 for p in range(_s2s_trg.shape[0]):
                     _s2s_trg[p, : _text_input[p]] = 1
-                _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
+                _dur_pred = torch.sigmoid(_s2s_pred).sum(dim=1)
 
                 loss_dur += F.l1_loss(
                     _dur_pred[1 : _text_length - 1], _text_input[1 : _text_length - 1]
@@ -660,9 +642,7 @@ def main(config_path, run_name):
             (g_loss / accum_steps).backward()
 
             if is_update_step:
-                gen_keys = ["bert_encoder", "bert", "predictor", "predictor_encoder", "style_encoder", "decoder"]
-                if epoch >= diff_epoch:
-                    gen_keys.append("diffusion")
+                gen_keys = ["bert_encoder", "bert", "predictor", "predictor_encoder", "style_encoder", "decoder", "diffusion"]
                 torch.nn.utils.clip_grad_norm_(
                     [p for k in gen_keys if k in model for p in model[k].parameters()], grad_clip
                 )
@@ -672,109 +652,103 @@ def main(config_path, run_name):
                 optimizer.step_and_scheduler("predictor_encoder")
                 optimizer.step_and_scheduler("style_encoder")
                 optimizer.step_and_scheduler("decoder")
-
-                if epoch >= diff_epoch:
-                    optimizer.step_and_scheduler("diffusion")
-
-            if epoch >= joint_epoch:
-                # randomly pick whether to use in-distribution text
-                if np.random.rand() < 0.5:
-                    use_ind = True
-                else:
-                    use_ind = False
-
-                if use_ind:
-                    ref_lengths = input_lengths
-                    ref_texts = texts
-
-                if is_update_step:
-                    slm_out = slmadv(
-                        i // grad_accum,
-                        y_rec_gt,
-                        y_rec_gt_pred,
-                        waves,
-                        mel_input_length,
-                        ref_texts,
-                        ref_lengths,
-                        use_ind,
-                        s_trg.detach(),
-                        ref if multispeaker else None,
-                    )
-                else:
-                    slm_out = None
-
-                if slm_out is None:
-                    iters = iters + 1
-                    reason = "no-update-step" if not is_update_step else "no-valid-clips"
-                    train_bar.set_postfix(
-                        metric_postfix(
-                            mel=running_loss / max(1, running_steps),
-                            disc=d_loss,
-                            dur=loss_dur,
-                        )
-                        | {"slmadv": reason}
-                    )
-                    if (i + 1) % log_interval == 0:
-                        running_loss = 0.0
-                        running_steps = 0
-                    continue
-
-                d_loss_slm, loss_gen_lm, y_pred = slm_out
-                d_loss_slm = d_loss_slm * slmadv_weight if d_loss_slm != 0 else d_loss_slm
-                loss_gen_lm = loss_gen_lm * slmadv_weight
-
-                # SLM generator loss
-                for _k in ["bert_encoder", "bert", "predictor", "diffusion"]:
-                    if _k in optimizer.optimizers:
-                        optimizer.optimizers[_k].zero_grad()
-                loss_gen_lm.backward()
-
-                # compute the gradient norm
-                total_norm = {}
-                for key in model.keys():
-                    total_norm[key] = 0
-                    parameters = [
-                        p
-                        for p in model[key].parameters()
-                        if p.grad is not None and p.requires_grad
-                    ]
-                    for p in parameters:
-                        param_norm = p.grad.detach().data.norm(2)
-                        total_norm[key] += param_norm.item() ** 2
-                    total_norm[key] = total_norm[key] ** 0.5
-
-                # gradient scaling
-                if total_norm["predictor"] > slmadv_params.thresh:
-                    for key in model.keys():
-                        for p in model[key].parameters():
-                            if p.grad is not None:
-                                p.grad *= 1 / total_norm["predictor"]
-
-                for p in model.predictor.duration_proj.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                for p in model.predictor.lstm.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                for p in model.diffusion.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                optimizer.step_and_scheduler("bert_encoder")
-                optimizer.step_and_scheduler("bert")
-                optimizer.step_and_scheduler("predictor")
                 optimizer.step_and_scheduler("diffusion")
 
-                # SLM discriminator loss
-                if d_loss_slm != 0:
-                    optimizer.optimizers["wd"].zero_grad()
-                    d_loss_slm.backward(retain_graph=True)
-                    optimizer.step_and_scheduler("wd")
-
+            # randomly pick whether to use in-distribution text
+            if np.random.rand() < 0.5:
+                use_ind = True
             else:
-                d_loss_slm, loss_gen_lm = 0, 0
+                use_ind = False
+
+            if use_ind:
+                ref_lengths = input_lengths
+                ref_texts = texts
+
+            if is_update_step:
+                slm_out = slmadv(
+                    i // grad_accum,
+                    y_rec_gt,
+                    y_rec_gt_pred,
+                    waves,
+                    mel_input_length,
+                    ref_texts,
+                    ref_lengths,
+                    use_ind,
+                    s_trg.detach(),
+                    ref if multispeaker else None,
+                )
+            else:
+                slm_out = None
+
+            if slm_out is None:
+                iters = iters + 1
+                reason = "no-update-step" if not is_update_step else "no-valid-clips"
+                train_bar.set_postfix(
+                    metric_postfix(
+                        mel=running_loss / max(1, running_steps),
+                        disc=d_loss,
+                        dur=loss_dur,
+                    )
+                    | {"slmadv": reason}
+                )
+                if (i + 1) % log_interval == 0:
+                    running_loss = 0.0
+                    running_steps = 0
+                continue
+
+            d_loss_slm, loss_gen_lm, y_pred = slm_out
+            d_loss_slm = d_loss_slm * slmadv_weight if d_loss_slm != 0 else d_loss_slm
+            loss_gen_lm = loss_gen_lm * slmadv_weight
+
+            # SLM generator loss
+            for _k in ["bert_encoder", "bert", "predictor", "diffusion"]:
+                if _k in optimizer.optimizers:
+                    optimizer.optimizers[_k].zero_grad()
+            loss_gen_lm.backward()
+
+            # compute the gradient norm
+            total_norm = {}
+            for key in model.keys():
+                total_norm[key] = 0
+                parameters = [
+                    p
+                    for p in model[key].parameters()
+                    if p.grad is not None and p.requires_grad
+                ]
+                for p in parameters:
+                    param_norm = p.grad.detach().data.norm(2)
+                    total_norm[key] += param_norm.item() ** 2
+                total_norm[key] = total_norm[key] ** 0.5
+
+            # gradient scaling
+            if total_norm["predictor"] > slmadv_params.thresh:
+                for key in model.keys():
+                    for p in model[key].parameters():
+                        if p.grad is not None:
+                            p.grad *= 1 / total_norm["predictor"]
+
+            for p in model.predictor.duration_proj.parameters():
+                if p.grad is not None:
+                    p.grad *= slmadv_params.scale
+
+            for p in model.predictor.lstm.parameters():
+                if p.grad is not None:
+                    p.grad *= slmadv_params.scale
+
+            for p in model.diffusion.parameters():
+                if p.grad is not None:
+                    p.grad *= slmadv_params.scale
+
+            optimizer.step_and_scheduler("bert_encoder")
+            optimizer.step_and_scheduler("bert")
+            optimizer.step_and_scheduler("predictor")
+            optimizer.step_and_scheduler("diffusion")
+
+            # SLM discriminator loss
+            if d_loss_slm != 0:
+                optimizer.optimizers["wd"].zero_grad()
+                d_loss_slm.backward(retain_graph=True)
+                optimizer.step_and_scheduler("wd")
 
             iters = iters + 1
 
@@ -872,7 +846,7 @@ def main(config_path, run_name):
                         t_en = model.text_encoder(texts, input_lengths, text_mask)
                         asr = t_en @ s2s_attn_mono
 
-                        d_gt = s2s_attn_mono.sum(axis=-1).detach()
+                        d_gt = s2s_attn_mono.sum(dim=-1).detach()
 
                     ss = []
                     gs = []
@@ -941,7 +915,7 @@ def main(config_path, run_name):
                         _s2s_trg = torch.zeros_like(_s2s_pred)
                         for bib in range(_s2s_trg.shape[0]):
                             _s2s_trg[bib, : _text_input[bib]] = 1
-                        _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
+                        _dur_pred = torch.sigmoid(_s2s_pred).sum(dim=1)
                         loss_dur += F.l1_loss(
                             _dur_pred[1 : _text_length - 1],
                             _text_input[1 : _text_length - 1],
