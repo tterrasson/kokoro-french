@@ -1,5 +1,6 @@
 import logging
 import os
+from typing import cast
 import os.path as osp
 import random
 import shutil
@@ -36,8 +37,9 @@ from utils import (
 from Utils.PLBERT.util import load_plbert
 
 if getattr(torch, "_original_load", None) is None:
-    torch._original_load = torch.load
-    torch.load = lambda *args, **kwargs: torch._original_load(
+    _original_load = torch.load
+    setattr(torch, "_original_load", _original_load)
+    torch.load = lambda *args, **kwargs: _original_load(
         *args, **{**kwargs, "weights_only": False}
     )
 
@@ -161,7 +163,7 @@ def main(config_path, run_name):
         "steps_per_epoch": max(1, len(train_dataloader) // grad_accum),
     }
 
-    model_params = recursive_munch(config["model_params"])
+    model_params = cast(Munch, recursive_munch(config["model_params"]))
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
     model = compile_model_for_training(model, config, logger)
@@ -369,9 +371,9 @@ def main(config_path, run_name):
                 asr = t_en @ s2s_attn_mono
 
             # get clips
-            mel_input_length_all = accelerator.gather(
+            mel_input_length_all = cast(torch.Tensor, accelerator.gather(
                 mel_input_length
-            )  # for balanced load
+            ))  # for balanced load
             mel_len = min(
                 [int(mel_input_length_all.min().item() / 2 - 1), max_len // 2]
             )
@@ -486,7 +488,7 @@ def main(config_path, run_name):
                 loss_slm = 0
                 g_loss = loss_mel
 
-            running_loss += accelerator.gather(loss_mel).mean().item()
+            running_loss += cast(torch.Tensor, accelerator.gather(loss_mel)).mean().item()
             running_steps += 1
 
             accelerator.backward(g_loss / accum_steps)
@@ -632,7 +634,7 @@ def main(config_path, run_name):
 
                 loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
-                loss_test += accelerator.gather(loss_mel).mean().item()
+                loss_test += cast(torch.Tensor, accelerator.gather(loss_mel)).mean().item()
                 iters_test += 1
                 if accelerator.is_main_process:
                     val_bar.set_postfix(
