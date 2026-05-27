@@ -87,6 +87,9 @@ class SLMAdversarialLoss(torch.nn.Module):
             text_mask,
         )
 
+        if torch.isnan(d).any():
+            return None
+
         bib = 0
 
         output_lengths = []
