@@ -272,10 +272,6 @@ def main(config_path, run_name):
         # (load_checkpoint sets them to eval(), which breaks spectral_norm)
         [model[key].train() for key in model]
 
-        # Initialize predictor_encoder from trained style_encoder
-        # (predictor_encoder is not trained in Stage 1)
-        model.predictor_encoder = copy.deepcopy(model.style_encoder)
-
     model = compile_model_for_training(model, config, logger)
 
     # DP — must happen AFTER load_checkpoint so state dict keys match

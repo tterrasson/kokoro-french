@@ -1,0 +1,208 @@
+batch_size: 2
+grad_accum: 4
+epochs_1st: 15
+epochs_2nd: 35                       # absolute target epoch — NOT added to start_epoch in resume path
+save_freq: 1
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTINUE STAGE 2 — resume from an epoch_2nd_XXXXX.pth checkpoint after a crash
+# or to push stage 2 training further.
+#
+# Use when: stage 2 training crashed mid-epoch, or you want to extend training
+# beyond the original `epochs_2nd` target.
+#
+# Workflow:
+#   1. Replace XXXXX in `pretrained_model` with the latest saved Stage 2 epoch
+#   2. train_second.py -p configs/config_french_ft_continue_stage2.yml
+#      → goes through the `load_pretrained` branch (second_stage_load_pretrained: true)
+#      → load_only_params: false keeps optimizer + scheduler + start_epoch + iters
+#      → training resumes from start_epoch and runs until `epochs_2nd`
+#
+# IMPORTANT GOTCHAS (read train_second.py around line 264 before changing this):
+# - `epochs_2nd` is an ABSOLUTE target in the resume path (not added to start_epoch
+#   as in the from-first-stage path at line 194). Make sure epochs_2nd > checkpoint
+#   epoch, otherwise the training loop is a no-op.
+# - load_only_params: false → optimizer/scheduler state is restored. You CANNOT
+#   change optimizer_params.lr (scheduler state prevails). To change LR, flip to
+#   true but accept OneCycle re-warmup.
+# - adv_warmup / slmadv_warmup / real_audio_mix_warmup are step-based and use
+#   `global_step = epoch * steps_per_epoch + i`, so warmups will be already
+#   complete on resume (assuming you trained past the warmup epochs the first
+#   time). That's the desired behaviour for a crash-restart.
+# ─────────────────────────────────────────────────────────────────────────────
+pretrained_model: "logs/kokoro-french/epoch_2nd_continue.pth"
+first_stage_path: "first_stage.pth"
+load_only_params: false              # keep epoch/iters/optimizer/scheduler → true continuity
+second_stage_load_pretrained: true   # take the resume branch (not the first→second handoff)
+log_interval: 10
+torch_compile:
+  enabled: false
+  modules: []
+  mode: "reduce-overhead"
+  fullgraph: false
+  dynamic: true
+  backend: "inductor"
+  recompile_limit: 8
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log_dir: "logs/kokoro-french"
+
+# ── Data ─────────────────────────────────────────────────────────────────────
+data_params:
+  train_data: "../training/train_list.txt"
+  val_data: "../training/val_list.txt"
+  root_path: "../dataset/audio"
+  OOD_data: "../training/OOD_texts.txt"
+  min_length: 50
+  num_workers: 16
+
+# ── Preprocessing ────────────────────────────────────────────────────────────
+preprocess_params:
+  sr: 24000
+  spect_params:
+    n_fft: 2048
+    win_length: 1200
+    hop_length: 300
+    n_mels: 80
+    fmin: 0
+    fmax: 8000
+
+# ── Model Architecture ───────────────────────────────────────────────────────
+model_params:
+  dim_in: 64
+  n_token: 178
+  hidden_dim: 512
+  style_dim: 128
+  max_dur: 50
+  multispeaker: true
+  n_mels: 80
+  dropout: 0.2
+  n_layer: 3
+  text_encoder_kernel_size: 5
+
+  decoder:
+    type: istftnet
+    upsample_rates: [10, 6]
+    upsample_kernel_sizes: [20, 12]
+    upsample_initial_channel: 512
+    resblock_kernel_sizes: [3, 7, 11]
+    resblock_dilation_sizes: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
+    gen_istft_n_fft: 20
+    gen_istft_hop_size: 5
+
+  diffusion:
+    embedding_mask_proba: 0.1
+    transformer:
+      num_layers: 3
+      num_heads: 8
+      head_features: 64
+      multiplier: 2
+    dist:
+      sigma_data: 0.2
+      estimate_sigma_data: true
+      mean: -3.0
+      std: 1.0
+
+  plbert:
+    hidden_size: 768
+    num_attention_heads: 12
+    intermediate_size: 2048
+    max_position_embeddings: 512
+    num_hidden_layers: 12
+    dropout: 0.1
+
+  slm:
+    model: "microsoft/wavlm-base-plus"
+    sr: 16000
+    hidden: 768
+    nlayers: 13
+    initial_channel: 64
+
+  discriminators:
+    mpd:
+      periods: [2, 3, 5, 7, 11, 17]
+    msd:
+      log_mag: true
+      fft_sizes: [1024, 2048, 512]
+      hop_sizes: [120, 240, 50]
+      win_lengths: [600, 1200, 240]
+    msstft:
+      enabled: true
+      log_mag: true
+      channels: 32
+      resolutions:
+        - [1024, 256, 1024]
+        - [2048, 512, 2048]
+        - [512, 128, 512]
+    subband:
+      enabled: true
+      log_mag: true
+      fft_size: 1024
+      hop_size: 256
+      win_length: 1024
+      channels: 16
+      bands:
+        - [0, 64]
+        - [64, 192]
+        - [192, 384]
+        - [384, null]
+    wd:
+      dropout_p: 0.05
+      return_fmaps: false
+      use_group_norm: false
+
+# ── Loss Weights ─────────────────────────────────────────────────────────────
+loss_params:
+  lambda_gen: 1.0
+  lambda_gen_start: 0.05
+  lambda_mel: 5.0
+  lambda_dur: 1.0
+  lambda_ce: 20.0
+  lambda_F0: 1.0
+  lambda_norm: 1.0
+  lambda_s2s: 1.0
+  lambda_mono: 1.0
+  lambda_slm: 1.0
+  lambda_slm_start: 0.05
+  lambda_msstft_adv: 0.10
+  lambda_msstft_fm: 0.50
+  lambda_subband_adv: 0.05
+  lambda_subband_fm: 0.25
+  lambda_diff: 1.0
+  lambda_sty: 1.0
+  TMA_epoch: 0
+  diff_epoch: 0
+  joint_epoch: 3
+  adv_warmup_epochs: 3
+  slmadv_warmup_epochs: 3
+  real_audio_mix_warmup_epochs: 3
+
+# ── Optimizer ────────────────────────────────────────────────────────────────
+# IMPORTANT: with load_only_params: false, these values are IGNORED for the
+# current LR (the checkpoint's scheduler state prevails). They only apply to
+# initial construction. To actually change the LR → load_only_params: true.
+optimizer_params:
+  lr: 0.0001
+  bert_lr: 0.00001
+  ft_lr: 0.0001
+  pct_start: 0.0
+  final_div_factor: 5
+  grad_clip: 5.0
+
+# ── Pitch Extractor ──────────────────────────────────────────────────────────
+F0_path: "Utils/JDC/bst.t7"
+
+# ── ASR Alignment Model ─────────────────────────────────────────────────────
+ASR_config: "Utils/ASR/config.yml"
+ASR_path: "Utils/ASR/epoch_00080.pth"
+
+# ── PLBERT ───────────────────────────────────────────────────────────────────
+PLBERT_dir: "Utils/PLBERT/"
+
+slmadv_params:
+  min_len: 30
+  max_len: 500
+  batch_percentage: 0.5
+  iter: 10
+  thresh: 5
+  scale: 0.01
+  sig: 1.5
