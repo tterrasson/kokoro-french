@@ -682,14 +682,20 @@ def main(config_path, run_name):
 
             if slm_out is None:
                 iters = iters + 1
-                reason = "no-update-step" if not is_update_step else "no-valid-clips"
                 train_bar.set_postfix(
                     metric_postfix(
                         mel=running_loss / max(1, running_steps),
                         disc=d_loss,
                         dur=loss_dur,
+                        ce=loss_ce,
+                        f0=loss_F0_rec,
+                        lm=loss_lm,
+                        gen=loss_gen_all,
+                        sty=loss_sty,
+                        diff=loss_diff,
+                        slm_d=0.0,
+                        slm_g=0.0,
                     )
-                    | {"slmadv": reason}
                 )
                 if (i + 1) % log_interval == 0:
                     running_loss = 0.0
