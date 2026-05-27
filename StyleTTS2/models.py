@@ -941,10 +941,22 @@ def build_model(args, text_aligner, pitch_extractor, bert):
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
     state = torch.load(path, map_location="cpu")
     params = state["net"]
+
+    def _strip_wrappers(sd):
+        # Strip DataParallel ("module.") and torch.compile ("_orig_mod.") prefixes
+        # so checkpoints saved with wrappers load into bare modules.
+        out = {}
+        for k, v in sd.items():
+            nk = k
+            while nk.startswith("module.") or nk.startswith("_orig_mod."):
+                nk = nk[len("module."):] if nk.startswith("module.") else nk[len("_orig_mod."):]
+            out[nk] = v
+        return out
+
     for key in model:
         if key in params and key not in ignore_modules:
             print("%s loaded" % key)
-            model[key].load_state_dict(params[key], strict=False)
+            model[key].load_state_dict(_strip_wrappers(params[key]), strict=False)
     _ = [model[key].eval() for key in model]
 
     if not load_only_params:

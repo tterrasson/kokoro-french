@@ -968,8 +968,17 @@ def main(config_path, run_name):
             if (loss_test / iters_test) < best_loss:
                 best_loss = loss_test / iters_test
             print("Saving..")
+
+            def _unwrap(m):
+                # Strip DataParallel (.module) and torch.compile (._orig_mod) wrappers
+                # so the saved state_dict has clean keys and can be loaded back into
+                # a bare module before DP/compile re-wrap on resume.
+                while hasattr(m, "module") or hasattr(m, "_orig_mod"):
+                    m = getattr(m, "module", None) or getattr(m, "_orig_mod")
+                return m
+
             state = {
-                "net": {key: model[key].state_dict() for key in model},
+                "net": {key: _unwrap(model[key]).state_dict() for key in model},
                 "optimizer": optimizer.state_dict(),
                 "iters": iters,
                 "val_loss": loss_test / iters_test,
